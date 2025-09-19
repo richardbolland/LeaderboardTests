@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Rive • Leaderboard</title>
+  <style>
+    html, body { height: 100%; }
+    body { font-family: sans-serif; margin: 0; padding: 0; background: #FFF; }
+    #rive-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; background: #FFF; }
+  </style>
+</head>
+<body>
+  <canvas id="rive-canvas"></canvas>
+
+  <script src="https://unpkg.com/@rive-app/webgl2@2" crossorigin="anonymous"></script>
+<script>
+  const PUB_HTML_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTXaiZRd6sKMSLZUV0n9N6Cb4XOCFtS2ZUW2IxSKsciht8VPYBQ2ViuQVZJWXjm56IYGjKJrxZs8rt0/pubhtml";
+  const MAX_SLOTS = 15;
+
+  const layout = new rive.Layout({ fit: rive.Fit.Layout, layoutScaleFactor: 1 });
+  const canvas = document.getElementById('rive-canvas');
+  let r = null;
+
+  // lightweight guard so we don't overlap loads
+  let isLoading = false;
+  let vmRef = null;
+  let lastIsStreaks = null;
+  let streaksWatcher = null;
+
+  function resize() { try { r?.resizeDrawingSurfaceToCanvas(); } catch {} }
+  addEventListener('resize', resize);
+
+  r = new rive.Rive({
+    src: 'leaderboard.riv',
+    canvas,
+    artboard: 'Dashboard',
+    stateMachines: ['State Machine 1'],
+    autoplay: true,
+    layout,
+    autoBind: true,
+    onLoad: () => {
+      resize();
+
+      const vm =
+        (typeof r.viewModelInstance === 'function' ? r.viewModelInstance('View Model 1') : null)
+        || r.viewModelInstance
+        || r.contents?.viewModel?.('View Model 1')?.instance?.();
+      if (!vm) return;
+
+      vmRef = vm;
+      // initial load based on current boolean
+      loadAndApply(readIsStreaks(vm));
+
+      // start tiny watcher for the boolean only (reloads on change)
+      startIsStreaksWatcher();
+    }
+  });
+
+  function readIsStreaks(vm) {
+    const p = vm.boolean?.('isStreaks') ?? vm.getBoolean?.('isStreaks');
+    return !!(p && 'value' in p ? p.value : p?.value);
+  }
+
+  function startIsStreaksWatcher() {
+    if (streaksWatcher) clearInterval(streaksWatcher);
+    lastIsStreaks = readIsStreaks(vmRef);
+    streaksWatcher = setInterval(() => {
+      const cur = readIsStreaks(vmRef);
+      if (cur !== lastIsStreaks && !isLoading) {
+        lastIsStreaks = cur;
+        loadAndApply(cur);
+      }
+    }, 1); // checks the VM boolean only; no network unless it changed
+  }
+
+  async function loadAndApply(isStreaks) {
+    try {
+      isLoading = true;
+      const sheetName = isStreaks ? 'Streaks' : 'Points';
+      const csvUrl = await buildCsvUrlForSheetName(PUB_HTML_URL, sheetName);
+
+      const res = await fetch(csvUrl);
+      if (!res.ok) throw new Error(`CSV fetch failed (${res.status}) -> ${csvUrl}`);
+      const csvText = await res.text();
+
+      await applyCsvToVm(vmRef, csvText, { isStreaks });
+    } catch (e) {
+      console.error('Failed to load/apply CSV:', e);
+    } finally {
+      isLoading = false;
+    }
+  }
+
+  // ----- Build a valid CSV URL for a given sheet name -----
+  async function buildCsvUrlForSheetName(pubHtmlUrl, sheetName) {
+    const pubBaseCsv = pubHtmlUrl.replace(/\/pubhtml(\?.*)?$/, "/pub?single=true&output=csv");
+    const htmlRes = await fetch(pubHtmlUrl);
+    if (!htmlRes.ok) throw new Error(`Failed to fetch pubhtml (${htmlRes.status})`);
+    const html = await htmlRes.text();
+    const gid = findGidForSheet(html, sheetName);
+    return `${pubBaseCsv}&gid=${gid ?? 0}`;
+  }
+  function findGidForSheet(html, sheetName) {
+    const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const nameRe = esc(String(sheetName).trim());
+    let m = new RegExp(`href="[^"]*?gid=(\\d+)[^"]*"[^>]*>\\s*${nameRe}\\s*<`, 'i').exec(html);
+    if (m) return m[1];
+    m = new RegExp(`data-gid="(\\d+)"[^>]*>\\s*${nameRe}\\s*<`, 'i').exec(html);
+    if (m) return m[1];
+    const near = new RegExp(`${nameRe}[\\s\\S]{0,200}?gid=(\\d+)`, 'i').exec(html);
+    if (near) return near[1];
+    return null;
+  }
+
+  // ----- Apply CSV to slots "1"…"15" -----
+  async function applyCsvToVm(vm, csvText, { isStreaks }) {
+    const rows = parseCSV(csvText).filter(r => r.length && r.some(c => (c || '').trim() !== ''));
+    if (!rows.length) return;
+
+    const headersRaw = rows[0].map(h => (h || '').trim());
+    const headers = headersRaw.map(h => h.toLowerCase());
+    const headersNoSpace = headersRaw.map(h => h.toLowerCase().replace(/\s+/g, ''));
+
+    const dataRows = rows.slice(1);
+
+    const idx = (label, fb) => {
+      const l = String(label).toLowerCase();
+      const i1 = headers.indexOf(l);
+      if (i1 !== -1) return i1;
+      const i2 = headersNoSpace.indexOf(l.replace(/\s+/g, ''));
+      return i2 !== -1 ? i2 : fb;
+    };
+
+    // Column mapping per mode
+    let nameI, scoreI, changeI, assessI, hwI, moduleI, lessonI;
+    if (isStreaks) {
+      // Name, Attendance Level, Attendance Day, Homework Level, Homework Day, Score
+      nameI   = idx('Name',   0);
+      scoreI  = idx('Score',  5);
+      lessonI = idx('Attendance Level', 1);  // → LessonAttendance
+      moduleI = idx('Attendance Day',   2);  // → ModuleCompletion
+      hwI     = idx('Homework Level',   3);  // → Homework
+      assessI = idx('Homework Day',     4);  // → AssessmentSubmission
+      changeI = -1; // none
+    } else {
+      // Name, Lesson Attendance, Module Completion, Homework, Assessment Submission, Score, Change
+      nameI   = idx('Name',                 0);
+      scoreI  = idx('Score',                5);
+      changeI = idx('Change',               6);
+      assessI = idx('Assessment Submission',4);
+      hwI     = idx('Homework',             3);
+      moduleI = idx('Module Completion',    2);
+      lessonI = idx('Lesson Attendance',    1);
+    }
+
+    const mapped = dataRows
+      .map((row, i) => ({
+        i,
+        name: String(row[nameI] ?? '').trim(),
+        score: num(row[scoreI]),
+        change: changeI >= 0 ? num(row[changeI]) : 0,
+        assessmentSubmission: num(row[assessI]),
+        homework:             num(row[hwI]),
+        moduleCompletion:     num(row[moduleI]),
+        lessonAttendance:     num(row[lessonI]),
+      }))
+      .filter(r => r.name !== '');
+
+    // Sort by score desc; ties keep original order
+    mapped.sort((a, b) => (b.score - a.score) || (a.i - b.i));
+
+    const count = Math.min(MAX_SLOTS, mapped.length);
+    for (let i = 0; i < count; i++) {
+      const row = mapped[i];
+      const entryVM = vm.viewModel?.(String(i + 1)) || vm.getViewModel?.(String(i + 1));
+      if (!entryVM) continue;
+
+      const posProp    = entryVM.number?.('Position')             ?? entryVM.getNumber?.('Position');
+      const nameProp   = entryVM.string?.('Name')                 ?? entryVM.getString?.('Name');
+      const scoreProp  = entryVM.number?.('Score')                ?? entryVM.getNumber?.('Score');
+      const changeProp = entryVM.number?.('ChangeState')          ?? entryVM.getNumber?.('ChangeState');
+
+      const asProp     = entryVM.number?.('AssessmentSubmission') ?? entryVM.getNumber?.('AssessmentSubmission');
+      const hwProp     = entryVM.number?.('Homework')             ?? entryVM.getNumber?.('Homework');
+      const mcProp     = entryVM.number?.('ModuleCompletion')     ?? entryVM.getNumber?.('ModuleCompletion');
+      const laProp     = entryVM.number?.('LessonAttendance')     ?? entryVM.getNumber?.('LessonAttendance');
+
+      if (posProp)    posProp.value = i + 1;
+      if (nameProp)   nameProp.value = row.name;
+      if (scoreProp)  scoreProp.value = row.score;
+      if (changeProp) changeProp.value = row.change;
+
+      if (asProp) asProp.value = row.assessmentSubmission;
+      if (hwProp) hwProp.value = row.homework;
+      if (mcProp) mcProp.value = row.moduleCompletion;
+      if (laProp) laProp.value = row.lessonAttendance;
+    }
+
+    // Fire Play once values are set
+    requestAnimationFrame(() => firePlay(vm));
+  }
+
+  function firePlay(vm) {
+    const play = vm?.trigger?.('Play') || vm?.getTrigger?.('Play');
+    if (play?.trigger) play.trigger();
+    else if (play?.fire) play.fire();
+  }
+
+  // CSV parser (supports quotes)
+  function parseCSV(text) {
+    const rows = [];
+    let row = [], field = "", inQuotes = false;
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      if (inQuotes) {
+        if (c === '"') {
+          if (text[i + 1] === '"') { field += '"'; i++; }
+          else { inQuotes = false; }
+        } else field += c;
+      } else {
+        if (c === '"') inQuotes = true;
+        else if (c === ',') { row.push(field); field = ""; }
+        else if (c === '\n') { row.push(field); rows.push(row); row = []; field = ""; }
+        else if (c === '\r') { /* ignore */ }
+        else field += c;
+      }
+    }
+    row.push(field);
+    rows.push(row);
+    return rows;
+  }
+
+  // numeric helper (handles blanks/commas)
+  function num(v) {
+    if (v == null) return 0;
+    const n = Number(String(v).replace(/[, ]+/g, ''));
+    return isNaN(n) ? 0 : n;
+  }
+</script>
+</body>
+</html>
