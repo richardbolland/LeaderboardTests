@@ -15,18 +15,34 @@
 
   <script src="https://unpkg.com/@rive-app/webgl2@2" crossorigin="anonymous"></script>
 <script>
+  // ---------- Config ----------
   const PUB_HTML_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTXaiZRd6sKMSLZUV0n9N6Cb4XOCFtS2ZUW2IxSKsciht8VPYBQ2ViuQVZJWXjm56IYGjKJrxZs8rt0/pubhtml";
-  const MAX_SLOTS = 15;
+  const DEFAULT_USER_ID = "qwe712"; // override via ?userId=...
 
+  // ---------- Rive setup ----------
   const layout = new rive.Layout({ fit: rive.Fit.Layout, layoutScaleFactor: 1 });
   const canvas = document.getElementById('rive-canvas');
   let r = null;
 
-  // lightweight guard so we don't overlap loads
-  let isLoading = false;
-  let vmRef = null;
+  // Runtime state
+  let vm1 = null;
+  let studentVM = null;
+
+  // Slot layout (measured at runtime)
+  const HERO_SLOTS = 3;         // we pin top 3 in slots 1..3
+  let TOTAL_SLOTS = 10;         // measured
+  let TABLE_START_SLOT = 4;     // first table slot index (1-based)
+  let TABLE_SLOTS = 7;          // measured = TOTAL_SLOTS - HERO_SLOTS
+
+  // Two fully-preloaded datasets
+  const datasets = {
+    points:  { rows: [], pages: 1, map: new Map() },
+    streaks: { rows: [], pages: 1, map: new Map() },
+  };
+  let active = 'points'; // 'points' | 'streaks'
+  let pageIndex = 0;     // 0-based
+  let isStreaksWatcher = null;
   let lastIsStreaks = null;
-  let streaksWatcher = null;
 
   function resize() { try { r?.resizeDrawingSurfaceToCanvas(); } catch {} }
   addEventListener('resize', resize);
@@ -39,68 +55,102 @@
     autoplay: true,
     layout,
     autoBind: true,
-    onLoad: () => {
+    onLoad: async () => {
       resize();
 
-      const vm =
-        (typeof r.viewModelInstance === 'function' ? r.viewModelInstance('View Model 1') : null)
-        || r.viewModelInstance
-        || r.contents?.viewModel?.('View Model 1')?.instance?.();
-      if (!vm) return;
+      // View models
+      vm1 =
+        (typeof r.viewModelInstance === 'function' ? r.viewModelInstance('View Model 1') : null) ||
+        r.viewModelInstance ||
+        r.contents?.viewModel?.('View Model 1')?.instance?.();
 
-      vmRef = vm;
-      // initial load based on current boolean
-      loadAndApply(readIsStreaks(vm));
+      studentVM =
+        (typeof r.viewModelInstance === 'function' ? r.viewModelInstance('Student') : null) ||
+        vm1?.viewModel?.('Student') || vm1?.getViewModel?.('Student') ||
+        r.contents?.viewModel?.('Student')?.instance?.();
 
-      // start tiny watcher for the boolean only (reloads on change)
-      startIsStreaksWatcher();
+      if (!vm1) return;
+
+      // Measure how many numeric row slots you actually have (1..N contiguous)
+      measureSlots();
+
+      // Subscribe to Rive Events (paging + optional mode events)
+      r.on?.(rive.EventType.RiveEvent, (evt) => {
+        const ev = evt?.data;
+        if (!ev || ev.type !== rive.RiveEventType.General) return;
+        const name = ev.name;
+        if (name === 'PageForward') goPage(+1);
+        else if (name === 'PageBack') goPage(-1);
+        else if (name === 'ModePoints') setMode('points', { resetPage: false });
+        else if (name === 'ModeStreaks') setMode('streaks', { resetPage: false });
+        else if (name === 'ToggleMode') setMode(active === 'points' ? 'streaks' : 'points', { resetPage: false });
+      });
+
+      // Preload BOTH sheets up-front
+      await preloadBoth();
+
+      // Initial mode from boolean, instant from cache
+      const initialIsStreaks = readIsStreaks();
+      setMode(initialIsStreaks ? 'streaks' : 'points', { resetPage: true }); // start at page 1
+
+      // Optional watcher ONLY for boolean flips (if you don't send ModePoints/ModeStreaks events)
+      lastIsStreaks = initialIsStreaks;
+      if (isStreaksWatcher) clearInterval(isStreaksWatcher);
+      isStreaksWatcher = setInterval(() => {
+        const cur = readIsStreaks();
+        if (cur !== lastIsStreaks) {
+          lastIsStreaks = cur;
+          setMode(cur ? 'streaks' : 'points', { resetPage: false });
+        }
+      }, 500);
     }
   });
 
-  function readIsStreaks(vm) {
-    const p = vm.boolean?.('isStreaks') ?? vm.getBoolean?.('isStreaks');
-    return !!(p && 'value' in p ? p.value : p?.value);
+  // ---------- Measure slots ----------
+  function measureSlots() {
+    // count contiguous VMs named "1","2",..."N"
+    let n = 0;
+    for (let i = 1; i <= 50; i++) {
+      const vm = vm1?.viewModel?.(String(i)) || vm1?.getViewModel?.(String(i));
+      if (!vm) break;
+      n = i;
+    }
+    TOTAL_SLOTS = Math.max(n, HERO_SLOTS);
+    TABLE_START_SLOT = Math.min(HERO_SLOTS + 1, TOTAL_SLOTS + 1); // usually 4
+    TABLE_SLOTS = Math.max(0, TOTAL_SLOTS - HERO_SLOTS);
   }
 
-  function startIsStreaksWatcher() {
-    if (streaksWatcher) clearInterval(streaksWatcher);
-    lastIsStreaks = readIsStreaks(vmRef);
-    streaksWatcher = setInterval(() => {
-      const cur = readIsStreaks(vmRef);
-      if (cur !== lastIsStreaks && !isLoading) {
-        lastIsStreaks = cur;
-        loadAndApply(cur);
-      }
-    }, 1); // checks the VM boolean only; no network unless it changed
-  }
+  // ---------- Preload both datasets ----------
+  async function preloadBoth() {
+    // Resolve both gids from one pubhtml fetch
+    const html = await (await fetch(PUB_HTML_URL)).text();
+    const gidPoints  = findGidForSheet(html, 'Points')  ?? 0;
+    const gidStreaks = findGidForSheet(html, 'Streaks') ?? 0;
 
-  async function loadAndApply(isStreaks) {
-    try {
-      isLoading = true;
-      const sheetName = isStreaks ? 'Streaks' : 'Points';
-      const csvUrl = await buildCsvUrlForSheetName(PUB_HTML_URL, sheetName);
+    const baseCsv = PUB_HTML_URL.replace(/\/pubhtml(\?.*)?$/, "/pub?single=true&output=csv");
+    const urlPoints  = `${baseCsv}&gid=${gidPoints}`;
+    const urlStreaks = `${baseCsv}&gid=${gidStreaks}`;
 
-      const res = await fetch(csvUrl);
-      if (!res.ok) throw new Error(`CSV fetch failed (${res.status}) -> ${csvUrl}`);
-      const csvText = await res.text();
+    // Fetch in parallel
+    const [csvPoints, csvStreaks] = await Promise.all([
+      fetch(urlPoints).then(r => r.text()),
+      fetch(urlStreaks).then(r => r.text()),
+    ]);
 
-      await applyCsvToVm(vmRef, csvText, { isStreaks });
-    } catch (e) {
-      console.error('Failed to load/apply CSV:', e);
-    } finally {
-      isLoading = false;
+    // Parse & map
+    datasets.points.rows  = parseAndMap(csvPoints,  false);
+    datasets.streaks.rows = parseAndMap(csvStreaks, true);
+
+    // Sort + position + helpers
+    for (const key of ['points','streaks']) {
+      const ds = datasets[key];
+      ds.rows.sort((a,b) => (b.score - a.score) || (a.i - b.i));
+      for (let i = 0; i < ds.rows.length; i++) ds.rows[i].position = i + 1;
+      ds.pages = computeTotalPages(ds.rows.length);
+      ds.map = new Map(ds.rows.map((row, i) => [row.userId, i]));
     }
   }
 
-  // ----- Build a valid CSV URL for a given sheet name -----
-  async function buildCsvUrlForSheetName(pubHtmlUrl, sheetName) {
-    const pubBaseCsv = pubHtmlUrl.replace(/\/pubhtml(\?.*)?$/, "/pub?single=true&output=csv");
-    const htmlRes = await fetch(pubHtmlUrl);
-    if (!htmlRes.ok) throw new Error(`Failed to fetch pubhtml (${htmlRes.status})`);
-    const html = await htmlRes.text();
-    const gid = findGidForSheet(html, sheetName);
-    return `${pubBaseCsv}&gid=${gid ?? 0}`;
-  }
   function findGidForSheet(html, sheetName) {
     const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const nameRe = esc(String(sheetName).trim());
@@ -113,17 +163,143 @@
     return null;
   }
 
-  // ----- Apply CSV to slots "1"…"15" -----
-  async function applyCsvToVm(vm, csvText, { isStreaks }) {
+  // ---------- Mode switching (instant from cache) ----------
+  function setMode(which, { resetPage }) {
+    active = which; // 'points' or 'streaks'
+    const ds = datasets[active];
+
+    // recompute total pages in case slot layout changed
+    ds.pages = computeTotalPages(ds.rows.length);
+
+    // Decide page
+    pageIndex = resetPage ? 0 : Math.min(pageIndex, ds.pages - 1);
+
+    // Write pinned TOP 3 into slots 1..3
+    renderHero(ds.rows);
+
+    // Fill Student card (same userId) from the active dataset
+    const userId = getCurrentUserId();
+    const uIdx = ds.map.get(userId);
+    if (studentVM) writeStudent(studentVM, (typeof uIdx === 'number') ? ds.rows[uIdx] : null);
+
+    // Render table & animate
+    writePageNumbers(ds.pages);
+    renderTable(ds.rows);
+    firePlay();
+  }
+
+  function computeTotalPages(totalRows) {
+    const remaining = Math.max(0, totalRows - HERO_SLOTS);
+    const perPage = Math.max(1, TABLE_SLOTS || 1); // never 0
+    return Math.max(1, Math.ceil(remaining / perPage));
+  }
+
+  // ---------- Paging ----------
+  function goPage(delta) {
+    const ds = datasets[active];
+    const next = Math.min(Math.max(pageIndex + delta, 0), ds.pages - 1);
+    if (next === pageIndex) return;
+    pageIndex = next;
+    writePageNumbers(ds.pages);
+    renderTable(ds.rows);
+    firePlay();
+  }
+
+  function writePageNumbers(totalPages) {
+    const pi = vm1?.number?.('PageIndex')  ?? vm1?.getNumber?.('PageIndex');
+    const tp = vm1?.number?.('TotalPages') ?? vm1?.getNumber?.('TotalPages');
+    if (pi) pi.value = pageIndex + 1;
+    if (tp) tp.value = totalPages;
+  }
+
+  // ---------- Renderers ----------
+  function renderHero(rows) {
+    // Always write absolute top 1..3 to slots 1..3
+    for (let i = 0; i < HERO_SLOTS; i++) {
+      const slot = i + 1; // 1-based
+      const entryVM = vm1?.viewModel?.(String(slot)) || vm1?.getViewModel?.(String(slot));
+      if (!entryVM) continue;
+
+      const row = rows[i]; // top i
+      writeEntry(entryVM, row, /*fallbackPosition=*/slot);
+    }
+  }
+
+  function renderTable(rows) {
+    // Page across rows starting from index 3 (zero-based) = position 4
+    const firstIdx = HERO_SLOTS + pageIndex * TABLE_SLOTS; // zero-based index into rows
+    for (let j = 0; j < TABLE_SLOTS; j++) {
+      const slot = TABLE_START_SLOT + j; // slot number in VM
+      const entryVM = vm1?.viewModel?.(String(slot)) || vm1?.getViewModel?.(String(slot));
+      if (!entryVM) continue;
+
+      const row = rows[firstIdx + j];
+      const fallbackPos = HERO_SLOTS + (pageIndex * TABLE_SLOTS) + j + 1; // reasonable label when blank
+      writeEntry(entryVM, row, fallbackPos);
+    }
+  }
+
+  function writeEntry(entryVM, row, fallbackPosition) {
+    const posProp     = entryVM.number?.('Position')             ?? entryVM.getNumber?.('Position');
+    const nameProp    = entryVM.string?.('Name')                  ?? entryVM.getString?.('Name');
+    const scoreProp   = entryVM.number?.('Score')                 ?? entryVM.getNumber?.('Score');
+    const changeProp  = entryVM.number?.('ChangeState')           ?? entryVM.getNumber?.('ChangeState');
+    const asProp      = entryVM.number?.('AssessmentSubmission')  ?? entryVM.getNumber?.('AssessmentSubmission');
+    const hwProp      = entryVM.number?.('Homework')              ?? entryVM.getNumber?.('Homework');
+    const mcProp      = entryVM.number?.('ModuleCompletion')      ?? entryVM.getNumber?.('ModuleCompletion');
+    const laProp      = entryVM.number?.('LessonAttendance')      ?? entryVM.getNumber?.('LessonAttendance');
+
+    if (row) {
+      if (posProp)    posProp.value = row.position;   // absolute rank
+      if (nameProp)   nameProp.value = row.name;
+      if (scoreProp)  scoreProp.value = row.score;
+      if (changeProp) changeProp.value = row.change;
+      if (asProp) asProp.value = row.assessmentSubmission;
+      if (hwProp) hwProp.value = row.homework;
+      if (mcProp) mcProp.value = row.moduleCompletion;
+      if (laProp) laProp.value = row.lessonAttendance;
+    } else {
+      if (posProp)    posProp.value = fallbackPosition || 0;
+      if (nameProp)   nameProp.value = '';
+      if (scoreProp)  scoreProp.value = 0;
+      if (changeProp) changeProp.value = 0;
+      if (asProp) asProp.value = 0;
+      if (hwProp) hwProp.value = 0;
+      if (mcProp)  mcProp.value = 0;
+      if (laProp)  laProp.value = 0;
+    }
+  }
+
+  // ---------- Student card ----------
+  function writeStudent(svm, row) {
+    const sName  = svm?.string?.('StudentName')     ?? svm?.getString?.('StudentName');
+    const sPos   = svm?.number?.('StudentPosition') ?? svm?.getNumber?.('StudentPosition');
+    const sScore = svm?.number?.('StudentScore')    ?? svm?.getNumber?.('StudentScore');
+    const sChg   = svm?.number?.('StudentChange')   ?? svm?.getNumber?.('StudentChange');
+
+    if (row) {
+      if (sName)  sName.value  = row.name;
+      if (sPos)   sPos.value   = row.position;
+      if (sScore) sScore.value = row.score;
+      if (sChg)   sChg.value   = row.change;
+    } else {
+      if (sName)  sName.value  = '';
+      if (sPos)   sPos.value   = 0;
+      if (sScore) sScore.value = 0;
+      if (sChg)   sChg.value   = 0;
+    }
+  }
+
+  // ---------- CSV parsing & mapping ----------
+  function parseAndMap(csvText, isStreaks) {
     const rows = parseCSV(csvText).filter(r => r.length && r.some(c => (c || '').trim() !== ''));
-    if (!rows.length) return;
+    if (!rows.length) return [];
 
     const headersRaw = rows[0].map(h => (h || '').trim());
     const headers = headersRaw.map(h => h.toLowerCase());
     const headersNoSpace = headersRaw.map(h => h.toLowerCase().replace(/\s+/g, ''));
 
     const dataRows = rows.slice(1);
-
     const idx = (label, fb) => {
       const l = String(label).toLowerCase();
       const i1 = headers.indexOf(l);
@@ -132,79 +308,40 @@
       return i2 !== -1 ? i2 : fb;
     };
 
-    // Column mapping per mode
-    let nameI, scoreI, changeI, assessI, hwI, moduleI, lessonI;
+    let nameI, scoreI, changeI, assessI, hwI, moduleI, lessonI, userI;
     if (isStreaks) {
-      // Name, Attendance Level, Attendance Day, Homework Level, Homework Day, Score
+      // Streaks: Name, Attendance Level, Attendance Day, Homework Level, Homework Day, Score, (UserID)
       nameI   = idx('Name',   0);
       scoreI  = idx('Score',  5);
-      lessonI = idx('Attendance Level', 1);  // → LessonAttendance
-      moduleI = idx('Attendance Day',   2);  // → ModuleCompletion
-      hwI     = idx('Homework Level',   3);  // → Homework
-      assessI = idx('Homework Day',     4);  // → AssessmentSubmission
-      changeI = -1; // none
+      lessonI = idx('Attendance Level', 1);  // -> LessonAttendance
+      moduleI = idx('Attendance Day',   2);  // -> ModuleCompletion
+      hwI     = idx('Homework Level',   3);  // -> Homework
+      assessI = idx('Homework Day',     4);  // -> AssessmentSubmission
+      changeI = -1;
+      userI   = idx('UserID',           6);
     } else {
-      // Name, Lesson Attendance, Module Completion, Homework, Assessment Submission, Score, Change
-      nameI   = idx('Name',                 0);
-      scoreI  = idx('Score',                5);
-      changeI = idx('Change',               6);
-      assessI = idx('Assessment Submission',4);
-      hwI     = idx('Homework',             3);
-      moduleI = idx('Module Completion',    2);
-      lessonI = idx('Lesson Attendance',    1);
+      // Points: Name, Lesson Attendance, Module Completion, Homework, Assessment Submission, Score, Change, UserID
+      nameI   = idx('Name',                  0);
+      scoreI  = idx('Score',                 5);
+      changeI = idx('Change',                6);
+      assessI = idx('Assessment Submission', 4);
+      hwI     = idx('Homework',              3);
+      moduleI = idx('Module Completion',     2);
+      lessonI = idx('Lesson Attendance',     1);
+      userI   = idx('UserID',                7);
     }
 
-    const mapped = dataRows
-      .map((row, i) => ({
-        i,
-        name: String(row[nameI] ?? '').trim(),
-        score: num(row[scoreI]),
-        change: changeI >= 0 ? num(row[changeI]) : 0,
-        assessmentSubmission: num(row[assessI]),
-        homework:             num(row[hwI]),
-        moduleCompletion:     num(row[moduleI]),
-        lessonAttendance:     num(row[lessonI]),
-      }))
-      .filter(r => r.name !== '');
-
-    // Sort by score desc; ties keep original order
-    mapped.sort((a, b) => (b.score - a.score) || (a.i - b.i));
-
-    const count = Math.min(MAX_SLOTS, mapped.length);
-    for (let i = 0; i < count; i++) {
-      const row = mapped[i];
-      const entryVM = vm.viewModel?.(String(i + 1)) || vm.getViewModel?.(String(i + 1));
-      if (!entryVM) continue;
-
-      const posProp    = entryVM.number?.('Position')             ?? entryVM.getNumber?.('Position');
-      const nameProp   = entryVM.string?.('Name')                 ?? entryVM.getString?.('Name');
-      const scoreProp  = entryVM.number?.('Score')                ?? entryVM.getNumber?.('Score');
-      const changeProp = entryVM.number?.('ChangeState')          ?? entryVM.getNumber?.('ChangeState');
-
-      const asProp     = entryVM.number?.('AssessmentSubmission') ?? entryVM.getNumber?.('AssessmentSubmission');
-      const hwProp     = entryVM.number?.('Homework')             ?? entryVM.getNumber?.('Homework');
-      const mcProp     = entryVM.number?.('ModuleCompletion')     ?? entryVM.getNumber?.('ModuleCompletion');
-      const laProp     = entryVM.number?.('LessonAttendance')     ?? entryVM.getNumber?.('LessonAttendance');
-
-      if (posProp)    posProp.value = i + 1;
-      if (nameProp)   nameProp.value = row.name;
-      if (scoreProp)  scoreProp.value = row.score;
-      if (changeProp) changeProp.value = row.change;
-
-      if (asProp) asProp.value = row.assessmentSubmission;
-      if (hwProp) hwProp.value = row.homework;
-      if (mcProp) mcProp.value = row.moduleCompletion;
-      if (laProp) laProp.value = row.lessonAttendance;
-    }
-
-    // Fire Play once values are set
-    requestAnimationFrame(() => firePlay(vm));
-  }
-
-  function firePlay(vm) {
-    const play = vm?.trigger?.('Play') || vm?.getTrigger?.('Play');
-    if (play?.trigger) play.trigger();
-    else if (play?.fire) play.fire();
+    return dataRows.map((row, i) => ({
+      i,
+      userId: String(row[userI] ?? '').trim(),
+      name: String(row[nameI] ?? '').trim(),
+      score: num(row[scoreI]),
+      change: changeI >= 0 ? num(row[changeI]) : 0,
+      assessmentSubmission: num(row[assessI]),
+      homework:             num(row[hwI]),
+      moduleCompletion:     num(row[moduleI]),
+      lessonAttendance:     num(row[lessonI]),
+    })).filter(r => r.name !== '');
   }
 
   // CSV parser (supports quotes)
@@ -231,11 +368,26 @@
     return rows;
   }
 
-  // numeric helper (handles blanks/commas)
   function num(v) {
     if (v == null) return 0;
     const n = Number(String(v).replace(/[, ]+/g, ''));
     return isNaN(n) ? 0 : n;
+  }
+
+  function readIsStreaks() {
+    const b = vm1?.boolean?.('isStreaks') ?? vm1?.getBoolean?.('isStreaks');
+    return !!(b && 'value' in b ? b.value : b?.value);
+  }
+
+  function getCurrentUserId() {
+    const u = new URL(location.href);
+    return u.searchParams.get('userId') || u.searchParams.get('user') || DEFAULT_USER_ID;
+  }
+
+  function firePlay() {
+    const play = vm1?.trigger?.('Play') || vm1?.getTrigger?.('Play');
+    if (play?.trigger) play.trigger();
+    else if (play?.fire) play.fire();
   }
 </script>
 </body>
