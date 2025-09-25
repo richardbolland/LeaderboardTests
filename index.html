@@ -19,30 +19,26 @@
   const PUB_HTML_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTXaiZRd6sKMSLZUV0n9N6Cb4XOCFtS2ZUW2IxSKsciht8VPYBQ2ViuQVZJWXjm56IYGjKJrxZs8rt0/pubhtml";
   const DEFAULT_USER_ID = "qwe712"; // override via ?userId=...
 
+  // Layout: pin top 3, then exactly 7 table rows per page
+  const HERO_SLOTS = 3;
+  const TABLE_SLOTS = 7;
+  const TABLE_START_SLOT = HERO_SLOTS + 1; // slot "4"
+
   // ---------- Rive setup ----------
   const layout = new rive.Layout({ fit: rive.Fit.Layout, layoutScaleFactor: 1 });
   const canvas = document.getElementById('rive-canvas');
   let r = null;
 
-  // Runtime state
   let vm1 = null;
   let studentVM = null;
 
-  // Slot layout (measured at runtime)
-  const HERO_SLOTS = 3;         // we pin top 3 in slots 1..3
-  let TOTAL_SLOTS = 10;         // measured
-  let TABLE_START_SLOT = 4;     // first table slot index (1-based)
-  let TABLE_SLOTS = 7;          // measured = TOTAL_SLOTS - HERO_SLOTS
-
-  // Two fully-preloaded datasets
   const datasets = {
     points:  { rows: [], pages: 1, map: new Map() },
     streaks: { rows: [], pages: 1, map: new Map() },
   };
-  let active = 'points'; // 'points' | 'streaks'
-  let pageIndex = 0;     // 0-based
-  let isStreaksWatcher = null;
-  let lastIsStreaks = null;
+  let active = 'points';
+  let pageIndex = 0; // 0-based
+  let dataReady = false;
 
   function resize() { try { r?.resizeDrawingSurfaceToCanvas(); } catch {} }
   addEventListener('resize', resize);
@@ -58,7 +54,6 @@
     onLoad: async () => {
       resize();
 
-      // View models
       vm1 =
         (typeof r.viewModelInstance === 'function' ? r.viewModelInstance('View Model 1') : null) ||
         r.viewModelInstance ||
@@ -71,59 +66,48 @@
 
       if (!vm1) return;
 
-      // Measure how many numeric row slots you actually have (1..N contiguous)
-      measureSlots();
+      // Mark loading started
+      setLoaded(false);
 
-      // Subscribe to Rive Events (paging + optional mode events)
+      // Event handler (with gating for mode switches until data is ready)
       r.on?.(rive.EventType.RiveEvent, (evt) => {
         const ev = evt?.data;
         if (!ev || ev.type !== rive.RiveEventType.General) return;
-        const name = ev.name;
-        if (name === 'PageForward') goPage(+1);
-        else if (name === 'PageBack') goPage(-1);
-        else if (name === 'ModePoints') setMode('points', { resetPage: false });
-        else if (name === 'ModeStreaks') setMode('streaks', { resetPage: false });
-        else if (name === 'ToggleMode') setMode(active === 'points' ? 'streaks' : 'points', { resetPage: false });
+        if (ev.name === 'PageForward') { goPage(+1); return; }
+        if (ev.name === 'PageBack')    { goPage(-1); return; }
+        if (!dataReady && (ev.name === 'ModePoints' || ev.name === 'ModeStreaks' || ev.name === 'ToggleMode')) return;
+        if (ev.name === 'ModePoints')   setMode('points',  { resetPage: false });
+        else if (ev.name === 'ModeStreaks') setMode('streaks', { resetPage: false });
+        else if (ev.name === 'ToggleMode')  setMode(active === 'points' ? 'streaks' : 'points', { resetPage: false });
       });
 
-      // Preload BOTH sheets up-front
+      // Preload both sheets
       await preloadBoth();
+      dataReady = true;
 
-      // Initial mode from boolean, instant from cache
-      const initialIsStreaks = readIsStreaks();
-      setMode(initialIsStreaks ? 'streaks' : 'points', { resetPage: true }); // start at page 1
+      // Initial render: top-10 page (with top-3 pinned)
+      const isStreaks = readIsStreaks();
+      setMode(isStreaks ? 'streaks' : 'points', { resetPage: true });
 
-      // Optional watcher ONLY for boolean flips (if you don't send ModePoints/ModeStreaks events)
-      lastIsStreaks = initialIsStreaks;
-      if (isStreaksWatcher) clearInterval(isStreaksWatcher);
-      isStreaksWatcher = setInterval(() => {
+      // Mark loading finished
+      setLoaded(true);
+
+      // Watch boolean if you don’t emit Mode* events
+      let last = isStreaks;
+      setInterval(() => {
         const cur = readIsStreaks();
-        if (cur !== lastIsStreaks) {
-          lastIsStreaks = cur;
+        if (cur !== last) {
+          last = cur;
           setMode(cur ? 'streaks' : 'points', { resetPage: false });
         }
       }, 500);
     }
   });
 
-  // ---------- Measure slots ----------
-  function measureSlots() {
-    // count contiguous VMs named "1","2",..."N"
-    let n = 0;
-    for (let i = 1; i <= 50; i++) {
-      const vm = vm1?.viewModel?.(String(i)) || vm1?.getViewModel?.(String(i));
-      if (!vm) break;
-      n = i;
-    }
-    TOTAL_SLOTS = Math.max(n, HERO_SLOTS);
-    TABLE_START_SLOT = Math.min(HERO_SLOTS + 1, TOTAL_SLOTS + 1); // usually 4
-    TABLE_SLOTS = Math.max(0, TOTAL_SLOTS - HERO_SLOTS);
-  }
-
   // ---------- Preload both datasets ----------
   async function preloadBoth() {
-    // Resolve both gids from one pubhtml fetch
-    const html = await (await fetch(PUB_HTML_URL)).text();
+    const htmlRes = await fetch(PUB_HTML_URL);
+    const html = await htmlRes.text();
     const gidPoints  = findGidForSheet(html, 'Points')  ?? 0;
     const gidStreaks = findGidForSheet(html, 'Streaks') ?? 0;
 
@@ -131,17 +115,14 @@
     const urlPoints  = `${baseCsv}&gid=${gidPoints}`;
     const urlStreaks = `${baseCsv}&gid=${gidStreaks}`;
 
-    // Fetch in parallel
     const [csvPoints, csvStreaks] = await Promise.all([
       fetch(urlPoints).then(r => r.text()),
       fetch(urlStreaks).then(r => r.text()),
     ]);
 
-    // Parse & map
     datasets.points.rows  = parseAndMap(csvPoints,  false);
     datasets.streaks.rows = parseAndMap(csvStreaks, true);
 
-    // Sort + position + helpers
     for (const key of ['points','streaks']) {
       const ds = datasets[key];
       ds.rows.sort((a,b) => (b.score - a.score) || (a.i - b.i));
@@ -163,35 +144,27 @@
     return null;
   }
 
-  // ---------- Mode switching (instant from cache) ----------
+  // ---------- Mode switching ----------
   function setMode(which, { resetPage }) {
-    active = which; // 'points' or 'streaks'
+    active = which;
     const ds = datasets[active];
 
-    // recompute total pages in case slot layout changed
     ds.pages = computeTotalPages(ds.rows.length);
-
-    // Decide page
     pageIndex = resetPage ? 0 : Math.min(pageIndex, ds.pages - 1);
 
-    // Write pinned TOP 3 into slots 1..3
-    renderHero(ds.rows);
-
-    // Fill Student card (same userId) from the active dataset
+    renderHero(ds.rows); // slots 1..3
     const userId = getCurrentUserId();
     const uIdx = ds.map.get(userId);
     if (studentVM) writeStudent(studentVM, (typeof uIdx === 'number') ? ds.rows[uIdx] : null);
 
-    // Render table & animate
     writePageNumbers(ds.pages);
     renderTable(ds.rows);
     firePlay();
   }
 
   function computeTotalPages(totalRows) {
-    const remaining = Math.max(0, totalRows - HERO_SLOTS);
-    const perPage = Math.max(1, TABLE_SLOTS || 1); // never 0
-    return Math.max(1, Math.ceil(remaining / perPage));
+    const remaining = Math.max(0, totalRows - HERO_SLOTS); // rows 4..N
+    return Math.max(1, Math.ceil(remaining / TABLE_SLOTS));
   }
 
   // ---------- Paging ----------
@@ -208,33 +181,28 @@
   function writePageNumbers(totalPages) {
     const pi = vm1?.number?.('PageIndex')  ?? vm1?.getNumber?.('PageIndex');
     const tp = vm1?.number?.('TotalPages') ?? vm1?.getNumber?.('TotalPages');
-    if (pi) pi.value = pageIndex + 1;
+    if (pi) pi.value = pageIndex + 1; // 1-based
     if (tp) tp.value = totalPages;
   }
 
   // ---------- Renderers ----------
   function renderHero(rows) {
-    // Always write absolute top 1..3 to slots 1..3
     for (let i = 0; i < HERO_SLOTS; i++) {
-      const slot = i + 1; // 1-based
+      const slot = i + 1;
       const entryVM = vm1?.viewModel?.(String(slot)) || vm1?.getViewModel?.(String(slot));
       if (!entryVM) continue;
-
-      const row = rows[i]; // top i
-      writeEntry(entryVM, row, /*fallbackPosition=*/slot);
+      writeEntry(entryVM, rows[i], slot);
     }
   }
 
   function renderTable(rows) {
-    // Page across rows starting from index 3 (zero-based) = position 4
-    const firstIdx = HERO_SLOTS + pageIndex * TABLE_SLOTS; // zero-based index into rows
+    const firstIdx = HERO_SLOTS + pageIndex * TABLE_SLOTS; // 0-based index (pos #4 onward)
     for (let j = 0; j < TABLE_SLOTS; j++) {
-      const slot = TABLE_START_SLOT + j; // slot number in VM
+      const slot = TABLE_START_SLOT + j; // slots 4..10
       const entryVM = vm1?.viewModel?.(String(slot)) || vm1?.getViewModel?.(String(slot));
       if (!entryVM) continue;
-
       const row = rows[firstIdx + j];
-      const fallbackPos = HERO_SLOTS + (pageIndex * TABLE_SLOTS) + j + 1; // reasonable label when blank
+      const fallbackPos = HERO_SLOTS + (pageIndex * TABLE_SLOTS) + j + 1;
       writeEntry(entryVM, row, fallbackPos);
     }
   }
@@ -250,14 +218,24 @@
     const laProp      = entryVM.number?.('LessonAttendance')      ?? entryVM.getNumber?.('LessonAttendance');
 
     if (row) {
-      if (posProp)    posProp.value = row.position;   // absolute rank
+      if (posProp)    posProp.value = row.position;
       if (nameProp)   nameProp.value = row.name;
       if (scoreProp)  scoreProp.value = row.score;
       if (changeProp) changeProp.value = row.change;
       if (asProp) asProp.value = row.assessmentSubmission;
       if (hwProp) hwProp.value = row.homework;
-      if (mcProp) mcProp.value = row.moduleCompletion;
-      if (laProp) laProp.value = row.lessonAttendance;
+      if (mcProp)  mcProp.value = row.moduleCompletion;
+      if (laProp)  laProp.value = row.lessonAttendance;
+
+      // --- Avatar indices now live directly on Entry (Skin, BodyShape, Hair) ---
+      const skinPropE = entryVM.number?.('Skin')      ?? entryVM.getNumber?.('Skin');
+      const bodyPropE = entryVM.number?.('BodyShape') ?? entryVM.getNumber?.('BodyShape');
+      const hairPropE = entryVM.number?.('Hair')      ?? entryVM.getNumber?.('Hair');
+      const [dA, dB, dC] = avatarDigits(row.userId); // A=Skin, B=BodyShape, C=Hair (0..9)
+      if (skinPropE) skinPropE.value = dA;
+      if (bodyPropE) bodyPropE.value = dB;
+      if (hairPropE) hairPropE.value = dC;
+
     } else {
       if (posProp)    posProp.value = fallbackPosition || 0;
       if (nameProp)   nameProp.value = '';
@@ -267,6 +245,13 @@
       if (hwProp) hwProp.value = 0;
       if (mcProp)  mcProp.value = 0;
       if (laProp)  laProp.value = 0;
+
+      const skinPropE = entryVM.number?.('Skin')      ?? entryVM.getNumber?.('Skin');
+      const bodyPropE = entryVM.number?.('BodyShape') ?? entryVM.getNumber?.('BodyShape');
+      const hairPropE = entryVM.number?.('Hair')      ?? entryVM.getNumber?.('Hair');
+      if (skinPropE) skinPropE.value = 0;
+      if (bodyPropE) bodyPropE.value = 0;
+      if (hairPropE) hairPropE.value = 0;
     }
   }
 
@@ -282,11 +267,52 @@
       if (sPos)   sPos.value   = row.position;
       if (sScore) sScore.value = row.score;
       if (sChg)   sChg.value   = row.change;
+
+      // Prefer direct numbers on Student; fallback to a nested Avatar if present
+      const sSkinDir = svm?.number?.('Skin')      ?? svm?.getNumber?.('Skin');
+      const sBodyDir = svm?.number?.('BodyShape') ?? svm?.getNumber?.('BodyShape');
+      const sHairDir = svm?.number?.('Hair')      ?? svm?.getNumber?.('Hair');
+      const [dA, dB, dC] = avatarDigits(row.userId);
+
+      if (sSkinDir || sBodyDir || sHairDir) {
+        if (sSkinDir) sSkinDir.value = dA;
+        if (sBodyDir) sBodyDir.value = dB;
+        if (sHairDir) sHairDir.value = dC;
+      } else {
+        const sAvatar = svm.viewModel?.('Avatar') || svm.getViewModel?.('Avatar');
+        if (sAvatar) {
+          const sSkin = sAvatar.number?.('Skin')      ?? sAvatar.getNumber?.('Skin');
+          const sBody = sAvatar.number?.('BodyShape') ?? sAvatar.getNumber?.('BodyShape');
+          const sHair = sAvatar.number?.('Hair')      ?? sAvatar.getNumber?.('Hair');
+          if (sSkin) sSkin.value = dA;
+          if (sBody) sBody.value = dB;
+          if (sHair) sHair.value = dC;
+        }
+      }
     } else {
       if (sName)  sName.value  = '';
       if (sPos)   sPos.value   = 0;
       if (sScore) sScore.value = 0;
       if (sChg)   sChg.value   = 0;
+
+      const sSkinDir = svm?.number?.('Skin')      ?? svm?.getNumber?.('Skin');
+      const sBodyDir = svm?.number?.('BodyShape') ?? svm?.getNumber?.('BodyShape');
+      const sHairDir = svm?.number?.('Hair')      ?? svm?.getNumber?.('Hair');
+      if (sSkinDir || sBodyDir || sHairDir) {
+        if (sSkinDir) sSkinDir.value = 0;
+        if (sBodyDir) sBodyDir.value = 0;
+        if (sHairDir) sHairDir.value = 0;
+      } else {
+        const sAvatar = svm.viewModel?.('Avatar') || svm.getViewModel?.('Avatar');
+        if (sAvatar) {
+          const sSkin = sAvatar.number?.('Skin')      ?? sAvatar.getNumber?.('Skin');
+          const sBody = sAvatar.number?.('BodyShape') ?? sAvatar.getNumber?.('BodyShape');
+          const sHair = sAvatar.number?.('Hair')      ?? sAvatar.getNumber?.('Hair');
+          if (sSkin) sSkin.value = 0;
+          if (sBody) sBody.value = 0;
+          if (sHair) sHair.value = 0;
+        }
+      }
     }
   }
 
@@ -313,25 +339,25 @@
       // Streaks: Name, Attendance Level, Attendance Day, Homework Level, Homework Day, Score, (UserID)
       nameI   = idx('Name',   0);
       scoreI  = idx('Score',  5);
-      lessonI = idx('Attendance Level', 1);  // -> LessonAttendance
-      moduleI = idx('Attendance Day',   2);  // -> ModuleCompletion
-      hwI     = idx('Homework Level',   3);  // -> Homework
-      assessI = idx('Homework Day',     4);  // -> AssessmentSubmission
+      lessonI = idx('Attendance Level', 1);
+      moduleI = idx('Attendance Day',   2);
+      hwI     = idx('Homework Level',   3);
+      assessI = idx('Homework Day',     4);
       changeI = -1;
       userI   = idx('UserID',           6);
     } else {
-      // Points: Name, Lesson Attendance, Module Completion, Homework, Assessment Submission, Score, Change, UserID
-      nameI   = idx('Name',                  0);
-      scoreI  = idx('Score',                 5);
-      changeI = idx('Change',                6);
-      assessI = idx('Assessment Submission', 4);
-      hwI     = idx('Homework',              3);
-      moduleI = idx('Module Completion',     2);
-      lessonI = idx('Lesson Attendance',     1);
-      userI   = idx('UserID',                7);
+      // Points: (UserID, Name, Lesson Attendance, Module Completion, Homework, Assessment Submission, Score, Change)
+      nameI   = idx('Name',                  1);
+      scoreI  = idx('Score',                 6);
+      changeI = idx('Change',                7);
+      assessI = idx('Assessment Submission', 5);
+      hwI     = idx('Homework',              4);
+      moduleI = idx('Module Completion',     3);
+      lessonI = idx('Lesson Attendance',     2);
+      userI   = idx('UserID',                0);
     }
 
-    return dataRows.map((row, i) => ({
+    const out = dataRows.map((row, i) => ({
       i,
       userId: String(row[userI] ?? '').trim(),
       name: String(row[nameI] ?? '').trim(),
@@ -342,9 +368,10 @@
       moduleCompletion:     num(row[moduleI]),
       lessonAttendance:     num(row[lessonI]),
     })).filter(r => r.name !== '');
+
+    return out;
   }
 
-  // CSV parser (supports quotes)
   function parseCSV(text) {
     const rows = [];
     let row = [], field = "", inQuotes = false;
@@ -379,9 +406,20 @@
     return !!(b && 'value' in b ? b.value : b?.value);
   }
 
+  function setLoaded(flag) {
+    const b = vm1?.boolean?.('isLoaded') ?? vm1?.getBoolean?.('isLoaded');
+    if (b && 'value' in b) b.value = !!flag;
+  }
+
   function getCurrentUserId() {
     const u = new URL(location.href);
     return u.searchParams.get('userId') || u.searchParams.get('user') || DEFAULT_USER_ID;
+  }
+
+  // Extract last three digits (A B C) from a userId like "...123"
+  function avatarDigits(userId) {
+    const m = String(userId || '').match(/(\d)(\d)(\d)$/);
+    return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : [0, 0, 0];
   }
 
   function firePlay() {
