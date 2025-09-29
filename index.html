@@ -19,25 +19,21 @@
   const PUB_HTML_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTXaiZRd6sKMSLZUV0n9N6Cb4XOCFtS2ZUW2IxSKsciht8VPYBQ2ViuQVZJWXjm56IYGjKJrxZs8rt0/pubhtml";
   const DEFAULT_USER_ID = "qwe712"; // override via ?userId=...
 
-  // Layout: pin top 3, then exactly 7 table rows per page
   const HERO_SLOTS = 3;
   const TABLE_SLOTS = 7;
   const TABLE_START_SLOT = HERO_SLOTS + 1; // slot "4"
 
-  // ---------- Rive setup ----------
   const layout = new rive.Layout({ fit: rive.Fit.Layout, layoutScaleFactor: 1 });
   const canvas = document.getElementById('rive-canvas');
-  let r = null;
-
-  let vm1 = null;
-  let studentVM = null;
+  let r = null, vm1 = null, studentVM = null, overviewVM = null;
 
   const datasets = {
-    points:  { rows: [], pages: 1, map: new Map() },
-    streaks: { rows: [], pages: 1, map: new Map() },
+    points:     { rows: [], pages: 1, map: new Map() },
+    attendance: { rows: [], pages: 1, map: new Map() },
+    homework:   { rows: [], pages: 1, map: new Map() },
   };
   let active = 'points';
-  let pageIndex = 0; // 0-based
+  let pageIndex = 0;
   let dataReady = false;
 
   function resize() { try { r?.resizeDrawingSurfaceToCanvas(); } catch {} }
@@ -52,8 +48,9 @@
     layout,
     autoBind: true,
     onLoad: async () => {
-      resize();
+      console.log('[LOAD] Rive onLoad');
 
+      resize();
       vm1 =
         (typeof r.viewModelInstance === 'function' ? r.viewModelInstance('View Model 1') : null) ||
         r.viewModelInstance ||
@@ -64,71 +61,79 @@
         vm1?.viewModel?.('Student') || vm1?.getViewModel?.('Student') ||
         r.contents?.viewModel?.('Student')?.instance?.();
 
+      overviewVM =
+        (typeof r.viewModelInstance === 'function' ? r.viewModelInstance('Overview') : null) ||
+        vm1?.viewModel?.('Overview') || vm1?.getViewModel?.('Overview') ||
+        r.contents?.viewModel?.('Overview')?.instance?.();
+
+      console.log('[VM] vm1?', !!vm1, '| Student?', !!studentVM, '| Overview?', !!overviewVM);
       if (!vm1) return;
 
-      // Mark loading started
       setLoaded(false);
 
-      // Event handler (with gating for mode switches until data is ready)
       r.on?.(rive.EventType.RiveEvent, (evt) => {
         const ev = evt?.data;
         if (!ev || ev.type !== rive.RiveEventType.General) return;
+        console.log('[EVENT]', ev.name);
         if (ev.name === 'PageForward') { goPage(+1); return; }
         if (ev.name === 'PageBack')    { goPage(-1); return; }
-        if (!dataReady && (ev.name === 'ModePoints' || ev.name === 'ModeStreaks' || ev.name === 'ToggleMode')) return;
-        if (ev.name === 'ModePoints')   setMode('points',  { resetPage: false });
-        else if (ev.name === 'ModeStreaks') setMode('streaks', { resetPage: false });
-        else if (ev.name === 'ToggleMode')  setMode(active === 'points' ? 'streaks' : 'points', { resetPage: false });
       });
 
-      // Preload both sheets
-      await preloadBoth();
+      await preloadAllThree();
       dataReady = true;
 
-      // Initial render: top-10 page (with top-3 pinned)
-      const isStreaks = readIsStreaks();
-      setMode(isStreaks ? 'streaks' : 'points', { resetPage: true });
+      const userId = getCurrentUserId();
+      console.log('[USER] id:', userId);
 
-      // Mark loading finished
+      writeOverview(userId);
+
+      const mode0 = readModeFromBooleans(true);
+      setMode(mode0, { resetPage: true });
+
       setLoaded(true);
 
-      // Watch boolean if you don’t emit Mode* events
-      let last = isStreaks;
+      let lastMode = mode0;
       setInterval(() => {
-        const cur = readIsStreaks();
-        if (cur !== last) {
-          last = cur;
-          setMode(cur ? 'streaks' : 'points', { resetPage: false });
+        const m = readModeFromBooleans(false);
+        if (m !== lastMode) {
+          console.log('[MODE] boolean change →', m);
+          lastMode = m;
+          setMode(m, { resetPage: true });
         }
-      }, 500);
+      }, 300);
     }
   });
 
-  // ---------- Preload both datasets ----------
-  async function preloadBoth() {
-    const htmlRes = await fetch(PUB_HTML_URL);
-    const html = await htmlRes.text();
-    const gidPoints  = findGidForSheet(html, 'Points')  ?? 0;
-    const gidStreaks = findGidForSheet(html, 'Streaks') ?? 0;
+  async function preloadAllThree() {
+    console.log('[CSV] fetch pubhtml …');
+    const html = await fetch(PUB_HTML_URL).then(r => r.text());
+    const gidPoints     = findGidForSheet(html, 'Points')             ?? 0;
+    const gidAttendance = findGidForSheet(html, 'Attendance Streaks') ?? 0;
+    const gidHomework   = findGidForSheet(html, 'Homework Streaks')   ?? 0;
+    console.log('[CSV] gids:', {gidPoints, gidAttendance, gidHomework});
 
     const baseCsv = PUB_HTML_URL.replace(/\/pubhtml(\?.*)?$/, "/pub?single=true&output=csv");
-    const urlPoints  = `${baseCsv}&gid=${gidPoints}`;
-    const urlStreaks = `${baseCsv}&gid=${gidStreaks}`;
+    const urlPoints     = `${baseCsv}&gid=${gidPoints}`;
+    const urlAttendance = `${baseCsv}&gid=${gidAttendance}`;
+    const urlHomework   = `${baseCsv}&gid=${gidHomework}`;
+    console.log('[CSV] urls:', {urlPoints, urlAttendance, urlHomework});
 
-    const [csvPoints, csvStreaks] = await Promise.all([
-      fetch(urlPoints).then(r => r.text()),
-      fetch(urlStreaks).then(r => r.text()),
-    ]);
+    const [resP, resA, resH] = await Promise.all([fetch(urlPoints), fetch(urlAttendance), fetch(urlHomework)]);
+    console.log('[CSV] status:', resP.status, resA.status, resH.status);
 
-    datasets.points.rows  = parseAndMap(csvPoints,  false);
-    datasets.streaks.rows = parseAndMap(csvStreaks, true);
+    const [csvPoints, csvAttend, csvHome] = await Promise.all([resP.text(), resA.text(), resH.text()]);
 
-    for (const key of ['points','streaks']) {
+    datasets.points.rows     = parsePoints(csvPoints);
+    datasets.attendance.rows = parseAttendance(csvAttend);
+    datasets.homework.rows   = parseHomework(csvHome);
+
+    for (const key of Object.keys(datasets)) {
       const ds = datasets[key];
-      ds.rows.sort((a,b) => (b.score - a.score) || (a.i - b.i));
+      ds.rows.sort((a,b) => ((b.score ?? 0) - (a.score ?? 0)) || (a.i - b.i));
       for (let i = 0; i < ds.rows.length; i++) ds.rows[i].position = i + 1;
       ds.pages = computeTotalPages(ds.rows.length);
       ds.map = new Map(ds.rows.map((row, i) => [row.userId, i]));
+      console.log(`[DATA] ${key}: rows=${ds.rows.length} pages=${ds.pages} sample0-2:`, ds.rows.slice(0,3));
     }
   }
 
@@ -144,17 +149,71 @@
     return null;
   }
 
-  // ---------- Mode switching ----------
+  function writeOverview(userId) {
+    if (!overviewVM) { console.warn('[OVERVIEW] VM missing'); return; }
+
+    const pIdx = datasets.points.map.get(userId);
+    const aIdx = datasets.attendance.map.get(userId);
+    const hIdx = datasets.homework.map.get(userId);
+    const p = typeof pIdx === 'number' ? datasets.points.rows[pIdx] : null;
+    const a = typeof aIdx === 'number' ? datasets.attendance.rows[aIdx] : null;
+    const h = typeof hIdx === 'number' ? datasets.homework.rows[hIdx] : null;
+
+    console.log('[OVERVIEW] pIdx/aIdx/hIdx:', pIdx, aIdx, hIdx, '| rows:', {p, a, h});
+
+    const v = {
+      StudentName:          overviewVM.string?.('StudentName')       ?? overviewVM.getString?.('StudentName'),
+      AttendanceLevel:      overviewVM.number?.('AttendanceLevel')   ?? overviewVM.getNumber?.('AttendanceLevel'),
+      AttendanceStreak:     overviewVM.number?.('AttendanceStreak')  ?? overviewVM.getNumber?.('AttendanceStreak'),
+      LessonAttendance:     overviewVM.number?.('LessonAttendance')  ?? overviewVM.getNumber?.('LessonAttendance'),
+      ModuleCompletion:     overviewVM.number?.('ModuleCompletion')  ?? overviewVM.getNumber?.('ModuleCompletion'),
+      Homework:             overviewVM.number?.('Homework')          ?? overviewVM.getNumber?.('Homework'),
+      AssessmentSubmission: overviewVM.number?.('AssessmentSubmission') ?? overviewVM.getNumber?.('AssessmentSubmission'),
+      TotalPoints:          overviewVM.number?.('TotalPoints')       ?? overviewVM.getNumber?.('TotalPoints'),
+      HomeworkLevel:        overviewVM.number?.('HomeworkLevel')     ?? overviewVM.getNumber?.('HomeworkLevel'),
+      HomeworkStreak:       overviewVM.number?.('HomeworkStreak')    ?? overviewVM.getNumber?.('HomeworkStreak'),
+    };
+
+    const name = p?.name || a?.name || h?.name || '';
+    if (v.StudentName)          v.StudentName.value          = name;
+    if (v.TotalPoints)          v.TotalPoints.value          = p?.score ?? 0;
+    if (v.LessonAttendance)     v.LessonAttendance.value     = p?.lessonAttendance ?? 0;
+    if (v.ModuleCompletion)     v.ModuleCompletion.value     = p?.moduleCompletion ?? 0;
+    if (v.Homework)             v.Homework.value             = p?.homework ?? 0;
+    if (v.AssessmentSubmission) v.AssessmentSubmission.value = p?.assessmentSubmission ?? 0;
+    if (v.AttendanceLevel)      v.AttendanceLevel.value      = a?.attendanceLevel ?? 0;
+    if (v.AttendanceStreak)     v.AttendanceStreak.value     = a?.attendanceDay   ?? 0;
+    if (v.HomeworkLevel)        v.HomeworkLevel.value        = h?.homeworkLevel   ?? 0;
+    if (v.HomeworkStreak)       v.HomeworkStreak.value       = h?.homeworkDay     ?? 0;
+  }
+
+  function readModeFromBooleans(verbose=false) {
+    const getB = (k) => {
+      const b = (vm1?.boolean?.(k) ?? vm1?.getBoolean?.(k));
+      return b && 'value' in b ? !!b.value : false;
+    };
+    const p = getB('isPoints');
+    const a = getB('isAttendance');
+    const h = getB('isHomework');
+    const mode = p ? 'points' : a ? 'attendance' : h ? 'homework' : 'points';
+    if (verbose) console.log('[MODE] flags →', {isPoints:p, isAttendance:a, isHomework:h, mode});
+    return mode;
+  }
+
   function setMode(which, { resetPage }) {
     active = which;
     const ds = datasets[active];
+    if (!ds) { console.warn('[MODE] unknown dataset', which); return; }
 
     ds.pages = computeTotalPages(ds.rows.length);
     pageIndex = resetPage ? 0 : Math.min(pageIndex, ds.pages - 1);
 
-    renderHero(ds.rows); // slots 1..3
+    console.log('[MODE] setMode:', which, '| rows:', ds.rows.length, '| pages:', ds.pages, '| pageIndex:', pageIndex);
+
+    renderHero(ds.rows);
     const userId = getCurrentUserId();
     const uIdx = ds.map.get(userId);
+    console.log('[STUDENT] userId:', userId, '| idx:', uIdx);
     if (studentVM) writeStudent(studentVM, (typeof uIdx === 'number') ? ds.rows[uIdx] : null);
 
     writePageNumbers(ds.pages);
@@ -163,11 +222,10 @@
   }
 
   function computeTotalPages(totalRows) {
-    const remaining = Math.max(0, totalRows - HERO_SLOTS); // rows 4..N
+    const remaining = Math.max(0, totalRows - HERO_SLOTS);
     return Math.max(1, Math.ceil(remaining / TABLE_SLOTS));
   }
 
-  // ---------- Paging ----------
   function goPage(delta) {
     const ds = datasets[active];
     const next = Math.min(Math.max(pageIndex + delta, 0), ds.pages - 1);
@@ -181,28 +239,32 @@
   function writePageNumbers(totalPages) {
     const pi = vm1?.number?.('PageIndex')  ?? vm1?.getNumber?.('PageIndex');
     const tp = vm1?.number?.('TotalPages') ?? vm1?.getNumber?.('TotalPages');
-    if (pi) pi.value = pageIndex + 1; // 1-based
+    if (pi) pi.value = pageIndex + 1;
     if (tp) tp.value = totalPages;
   }
 
-  // ---------- Renderers ----------
   function renderHero(rows) {
     for (let i = 0; i < HERO_SLOTS; i++) {
-      const slot = i + 1;
-      const entryVM = vm1?.viewModel?.(String(slot)) || vm1?.getViewModel?.(String(slot));
+      const slotName = String(i + 1);
+      const entryVM = vm1?.viewModel?.(slotName) || vm1?.getViewModel?.(slotName);
+      const row = rows[i];
+      console.log(`[HERO] slot ${slotName} → VM?`, !!entryVM, '| row?', !!row, row);
       if (!entryVM) continue;
-      writeEntry(entryVM, rows[i], slot);
+      writeEntry(entryVM, row, i + 1);
     }
   }
 
   function renderTable(rows) {
-    const firstIdx = HERO_SLOTS + pageIndex * TABLE_SLOTS; // 0-based index (pos #4 onward)
+    const firstIdx = HERO_SLOTS + pageIndex * TABLE_SLOTS;
+    console.log('[TABLE] firstIdx:', firstIdx, '| pageIndex:', pageIndex);
     for (let j = 0; j < TABLE_SLOTS; j++) {
-      const slot = TABLE_START_SLOT + j; // slots 4..10
-      const entryVM = vm1?.viewModel?.(String(slot)) || vm1?.getViewModel?.(String(slot));
-      if (!entryVM) continue;
+      const slot = TABLE_START_SLOT + j; // 4..10
+      const slotName = String(slot);
+      const entryVM = vm1?.viewModel?.(slotName) || vm1?.getViewModel?.(slotName);
       const row = rows[firstIdx + j];
       const fallbackPos = HERO_SLOTS + (pageIndex * TABLE_SLOTS) + j + 1;
+      console.log(`[ROW] slot ${slotName} → VM?`, !!entryVM, '| row?', !!row, row);
+      if (!entryVM) continue;
       writeEntry(entryVM, row, fallbackPos);
     }
   }
@@ -218,160 +280,162 @@
     const laProp      = entryVM.number?.('LessonAttendance')      ?? entryVM.getNumber?.('LessonAttendance');
 
     if (row) {
-      if (posProp)    posProp.value = row.position;
-      if (nameProp)   nameProp.value = row.name;
-      if (scoreProp)  scoreProp.value = row.score;
-      if (changeProp) changeProp.value = row.change;
-      if (asProp) asProp.value = row.assessmentSubmission;
-      if (hwProp) hwProp.value = row.homework;
-      if (mcProp)  mcProp.value = row.moduleCompletion;
-      if (laProp)  laProp.value = row.lessonAttendance;
+      console.log('[WRITE] entry', {pos: row.position, name: row.name, userId: row.userId, mode: active});
+      if (posProp)  posProp.value  = row.position ?? fallbackPosition ?? 0;
+      if (nameProp) nameProp.value = row.name ?? '';
 
-      // --- Avatar indices now live directly on Entry (Skin, BodyShape, Hair) ---
+      if (active === 'points') {
+        if (laProp) laProp.value = row.lessonAttendance ?? 0;
+        if (mcProp) mcProp.value = row.moduleCompletion ?? 0;
+        if (hwProp) hwProp.value = row.homework ?? 0;
+        if (asProp) asProp.value = row.assessmentSubmission ?? 0;
+        if (scoreProp)  scoreProp.value  = row.score ?? 0;
+        if (changeProp) changeProp.value = row.change ?? 0;
+      } else if (active === 'attendance') {
+        if (laProp) laProp.value = row.attendanceLevel ?? 0;
+        if (mcProp) mcProp.value = row.attendanceDay   ?? 0;
+        if (hwProp) hwProp.value = 0;
+        if (asProp) asProp.value = 0;
+        if (scoreProp)  scoreProp.value  = row.score ?? 0;
+        if (changeProp) changeProp.value = 0;
+      } else if (active === 'homework') {
+        if (hwProp) hwProp.value = row.homeworkLevel ?? 0;
+        if (asProp) asProp.value = row.homeworkDay   ?? 0;
+        if (laProp) laProp.value = 0;
+        if (mcProp) mcProp.value = 0;
+        if (scoreProp)  scoreProp.value  = row.score ?? 0;
+        if (changeProp) changeProp.value = 0;
+      }
+
       const skinPropE = entryVM.number?.('Skin')      ?? entryVM.getNumber?.('Skin');
       const bodyPropE = entryVM.number?.('BodyShape') ?? entryVM.getNumber?.('BodyShape');
       const hairPropE = entryVM.number?.('Hair')      ?? entryVM.getNumber?.('Hair');
-      const [dA, dB, dC] = avatarDigits(row.userId); // A=Skin, B=BodyShape, C=Hair (0..9)
-      if (skinPropE) skinPropE.value = dA;
-      if (bodyPropE) bodyPropE.value = dB;
-      if (hairPropE) hairPropE.value = dC;
-
+      if (skinPropE || bodyPropE || hairPropE) {
+        const [dA, dB, dC] = avatarDigits(row.userId);
+        if (skinPropE) skinPropE.value = dA;
+        if (bodyPropE) bodyPropE.value = dB;
+        if (hairPropE) hairPropE.value = dC;
+      }
     } else {
-      if (posProp)    posProp.value = fallbackPosition || 0;
-      if (nameProp)   nameProp.value = '';
-      if (scoreProp)  scoreProp.value = 0;
+      if (posProp)   posProp.value   = fallbackPosition || 0;
+      if (nameProp)  nameProp.value  = '';
+      if (scoreProp) scoreProp.value = 0;
       if (changeProp) changeProp.value = 0;
-      if (asProp) asProp.value = 0;
+      if (laProp) laProp.value = 0;
+      if (mcProp) mcProp.value = 0;
       if (hwProp) hwProp.value = 0;
-      if (mcProp)  mcProp.value = 0;
-      if (laProp)  laProp.value = 0;
-
-      const skinPropE = entryVM.number?.('Skin')      ?? entryVM.getNumber?.('Skin');
-      const bodyPropE = entryVM.number?.('BodyShape') ?? entryVM.getNumber?.('BodyShape');
-      const hairPropE = entryVM.number?.('Hair')      ?? entryVM.getNumber?.('Hair');
-      if (skinPropE) skinPropE.value = 0;
-      if (bodyPropE) bodyPropE.value = 0;
-      if (hairPropE) hairPropE.value = 0;
+      if (asProp) asProp.value = 0;
     }
   }
 
-  // ---------- Student card ----------
   function writeStudent(svm, row) {
     const sName  = svm?.string?.('StudentName')     ?? svm?.getString?.('StudentName');
     const sPos   = svm?.number?.('StudentPosition') ?? svm?.getNumber?.('StudentPosition');
     const sScore = svm?.number?.('StudentScore')    ?? svm?.getNumber?.('StudentScore');
     const sChg   = svm?.number?.('StudentChange')   ?? svm?.getNumber?.('StudentChange');
 
-    if (row) {
-      if (sName)  sName.value  = row.name;
-      if (sPos)   sPos.value   = row.position;
-      if (sScore) sScore.value = row.score;
-      if (sChg)   sChg.value   = row.change;
-
-      // Prefer direct numbers on Student; fallback to a nested Avatar if present
-      const sSkinDir = svm?.number?.('Skin')      ?? svm?.getNumber?.('Skin');
-      const sBodyDir = svm?.number?.('BodyShape') ?? svm?.getNumber?.('BodyShape');
-      const sHairDir = svm?.number?.('Hair')      ?? svm?.getNumber?.('Hair');
-      const [dA, dB, dC] = avatarDigits(row.userId);
-
-      if (sSkinDir || sBodyDir || sHairDir) {
-        if (sSkinDir) sSkinDir.value = dA;
-        if (sBodyDir) sBodyDir.value = dB;
-        if (sHairDir) sHairDir.value = dC;
-      } else {
-        const sAvatar = svm.viewModel?.('Avatar') || svm.getViewModel?.('Avatar');
-        if (sAvatar) {
-          const sSkin = sAvatar.number?.('Skin')      ?? sAvatar.getNumber?.('Skin');
-          const sBody = sAvatar.number?.('BodyShape') ?? sAvatar.getNumber?.('BodyShape');
-          const sHair = sAvatar.number?.('Hair')      ?? sAvatar.getNumber?.('Hair');
-          if (sSkin) sSkin.value = dA;
-          if (sBody) sBody.value = dB;
-          if (sHair) sHair.value = dC;
-        }
-      }
-    } else {
+    if (!row) {
+      console.warn('[STUDENT] no row to write');
       if (sName)  sName.value  = '';
       if (sPos)   sPos.value   = 0;
       if (sScore) sScore.value = 0;
       if (sChg)   sChg.value   = 0;
+      return;
+    }
 
-      const sSkinDir = svm?.number?.('Skin')      ?? svm?.getNumber?.('Skin');
-      const sBodyDir = svm?.number?.('BodyShape') ?? svm?.getNumber?.('BodyShape');
-      const sHairDir = svm?.number?.('Hair')      ?? svm?.getNumber?.('Hair');
-      if (sSkinDir || sBodyDir || sHairDir) {
-        if (sSkinDir) sSkinDir.value = 0;
-        if (sBodyDir) sBodyDir.value = 0;
-        if (sHairDir) sHairDir.value = 0;
-      } else {
-        const sAvatar = svm.viewModel?.('Avatar') || svm.getViewModel?.('Avatar');
-        if (sAvatar) {
-          const sSkin = sAvatar.number?.('Skin')      ?? sAvatar.getNumber?.('Skin');
-          const sBody = sAvatar.number?.('BodyShape') ?? sAvatar.getNumber?.('BodyShape');
-          const sHair = sAvatar.number?.('Hair')      ?? sAvatar.getNumber?.('Hair');
-          if (sSkin) sSkin.value = 0;
-          if (sBody) sBody.value = 0;
-          if (sHair) sHair.value = 0;
-        }
-      }
+    console.log('[STUDENT] write', {name: row.name, pos: row.position, uid: row.userId, mode: active});
+    if (sName) sName.value = row.name ?? '';
+    if (sPos)  sPos.value  = row.position ?? 0;
+    if (sScore) sScore.value = row.score ?? 0;
+    if (sChg)   sChg.value   = (active === 'points') ? (row.change ?? 0) : 0;
+
+    const sSkinDir = svm?.number?.('Skin')      ?? svm?.getNumber?.('Skin');
+    const sBodyDir = svm?.number?.('BodyShape') ?? svm?.getNumber?.('BodyShape');
+    const sHairDir = svm?.number?.('Hair')      ?? svm?.getNumber?.('Hair');
+    if (sSkinDir || sBodyDir || sHairDir) {
+      const [dA, dB, dC] = avatarDigits(row.userId);
+      if (sSkinDir) sSkinDir.value = dA;
+      if (sBodyDir) sBodyDir.value = dB;
+      if (sHairDir) sHairDir.value = dC;
     }
   }
 
-  // ---------- CSV parsing & mapping ----------
-  function parseAndMap(csvText, isStreaks) {
+  // ---------- Parsers ----------
+  function parsePoints(csvText) {
     const rows = parseCSV(csvText).filter(r => r.length && r.some(c => (c || '').trim() !== ''));
     if (!rows.length) return [];
-
-    const headersRaw = rows[0].map(h => (h || '').trim());
-    const headers = headersRaw.map(h => h.toLowerCase());
-    const headersNoSpace = headersRaw.map(h => h.toLowerCase().replace(/\s+/g, ''));
-
-    const dataRows = rows.slice(1);
-    const idx = (label, fb) => {
-      const l = String(label).toLowerCase();
-      const i1 = headers.indexOf(l);
-      if (i1 !== -1) return i1;
-      const i2 = headersNoSpace.indexOf(l.replace(/\s+/g, ''));
-      return i2 !== -1 ? i2 : fb;
-    };
-
-    let nameI, scoreI, changeI, assessI, hwI, moduleI, lessonI, userI;
-    if (isStreaks) {
-      // Streaks: Name, Attendance Level, Attendance Day, Homework Level, Homework Day, Score, (UserID)
-      nameI   = idx('Name',   0);
-      scoreI  = idx('Score',  5);
-      lessonI = idx('Attendance Level', 1);
-      moduleI = idx('Attendance Day',   2);
-      hwI     = idx('Homework Level',   3);
-      assessI = idx('Homework Day',     4);
-      changeI = -1;
-      userI   = idx('UserID',           6);
-    } else {
-      // Points: (UserID, Name, Lesson Attendance, Module Completion, Homework, Assessment Submission, Score, Change)
-      nameI   = idx('Name',                  1);
-      scoreI  = idx('Score',                 6);
-      changeI = idx('Change',                7);
-      assessI = idx('Assessment Submission', 5);
-      hwI     = idx('Homework',              4);
-      moduleI = idx('Module Completion',     3);
-      lessonI = idx('Lesson Attendance',     2);
-      userI   = idx('UserID',                0);
-    }
-
-    const out = dataRows.map((row, i) => ({
+    const headers = rows[0].map(h => (h || '').trim().toLowerCase());
+    const idx = name => headers.indexOf(name);
+    const nameI   = idx('name');
+    const userI   = idx('userid');
+    const scoreI  = idx('score');
+    const changeI = idx('change');
+    const lessonI = idx('lesson attendance');
+    const moduleI = idx('module completion');
+    const hwI     = idx('homework');
+    const assessI = idx('assessment submission');
+    const out = rows.slice(1).map((r,i) => ({
       i,
-      userId: String(row[userI] ?? '').trim(),
-      name: String(row[nameI] ?? '').trim(),
-      score: num(row[scoreI]),
-      change: changeI >= 0 ? num(row[changeI]) : 0,
-      assessmentSubmission: num(row[assessI]),
-      homework:             num(row[hwI]),
-      moduleCompletion:     num(row[moduleI]),
-      lessonAttendance:     num(row[lessonI]),
-    })).filter(r => r.name !== '');
-
+      userId: String(r[userI] ?? '').trim(),
+      name: String(r[nameI] ?? '').trim(),
+      score: num(r[scoreI]),
+      change: num(r[changeI]),
+      lessonAttendance: num(r[lessonI]),
+      moduleCompletion: num(r[moduleI]),
+      homework: num(r[hwI]),
+      assessmentSubmission: num(r[assessI]),
+    })).filter(x => x.name);
+    console.log('[PARSE:points] rows:', out.length, 'first:', out[0]);
     return out;
   }
 
+  function parseAttendance(csvText) {
+    const rows = parseCSV(csvText).filter(r => r.length && r.some(c => (c || '').trim() !== ''));
+    if (!rows.length) return [];
+    const headers = rows[0].map(h => (h || '').trim().toLowerCase());
+    const idx = name => headers.indexOf(name);
+    const nameI   = idx('name');
+    const userI   = idx('userid');
+    const levelI  = idx('attendance level');
+    const dayI    = idx('attendance day');
+    const scoreI  = idx('score');
+    const out = rows.slice(1).map((r,i) => ({
+      i,
+      userId: String(r[userI] ?? '').trim(),
+      name: String(r[nameI] ?? '').trim(),
+      attendanceLevel: num(r[levelI]),
+      attendanceDay:   num(r[dayI]),
+      score: num(scoreI >= 0 ? r[scoreI] : 0),
+      change: 0,
+    })).filter(x => x.name);
+    console.log('[PARSE:attendance] rows:', out.length, 'first:', out[0]);
+    return out;
+  }
+
+  function parseHomework(csvText) {
+    const rows = parseCSV(csvText).filter(r => r.length && r.some(c => (c || '').trim() !== ''));
+    if (!rows.length) return [];
+    const headers = rows[0].map(h => (h || '').trim().toLowerCase());
+    const idx = name => headers.indexOf(name);
+    const nameI   = idx('name');
+    const userI   = idx('userid');
+    const levelI  = idx('homework level');
+    const dayI    = idx('homework day');
+    const scoreI  = idx('score');
+    const out = rows.slice(1).map((r,i) => ({
+      i,
+      userId: String(r[userI] ?? '').trim(),
+      name: String(r[nameI] ?? '').trim(),
+      homeworkLevel: num(r[levelI]),
+      homeworkDay:   num(r[dayI]),
+      score: num(scoreI >= 0 ? r[scoreI] : 0),
+      change: 0,
+    })).filter(x => x.name);
+    console.log('[PARSE:homework] rows:', out.length, 'first:', out[0]);
+    return out;
+  }
+
+  // ---------- CSV helpers & misc ----------
   function parseCSV(text) {
     const rows = [];
     let row = [], field = "", inQuotes = false;
@@ -401,22 +465,11 @@
     return isNaN(n) ? 0 : n;
   }
 
-  function readIsStreaks() {
-    const b = vm1?.boolean?.('isStreaks') ?? vm1?.getBoolean?.('isStreaks');
-    return !!(b && 'value' in b ? b.value : b?.value);
-  }
-
-  function setLoaded(flag) {
-    const b = vm1?.boolean?.('isLoaded') ?? vm1?.getBoolean?.('isLoaded');
-    if (b && 'value' in b) b.value = !!flag;
-  }
-
   function getCurrentUserId() {
     const u = new URL(location.href);
     return u.searchParams.get('userId') || u.searchParams.get('user') || DEFAULT_USER_ID;
   }
 
-  // Extract last three digits (A B C) from a userId like "...123"
   function avatarDigits(userId) {
     const m = String(userId || '').match(/(\d)(\d)(\d)$/);
     return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : [0, 0, 0];
@@ -426,6 +479,11 @@
     const play = vm1?.trigger?.('Play') || vm1?.getTrigger?.('Play');
     if (play?.trigger) play.trigger();
     else if (play?.fire) play.fire();
+  }
+
+  function setLoaded(flag) {
+    const b = vm1?.boolean?.('isLoaded') ?? vm1?.getBoolean?.('isLoaded');
+    if (b && 'value' in b) b.value = !!flag;
   }
 </script>
 </body>
