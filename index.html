@@ -14,16 +14,27 @@
   <canvas id="rive-canvas"></canvas>
 
   <script src="https://unpkg.com/@rive-app/webgl2@2" crossorigin="anonymous"></script>
-<script>
-  // ---------- Config ----------
-  const PUB_HTML_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTXaiZRd6sKMSLZUV0n9N6Cb4XOCFtS2ZUW2IxSKsciht8VPYBQ2ViuQVZJWXjm56IYGjKJrxZs8rt0/pubhtml";
-  const DEFAULT_USER_ID = "qwe712"; // override via ?userId=...
+  <script>
+  /* ======================================================================= */
+  /*  1) CONFIG / OKTA (Bianca sim unless Okta injects window.email)         */
+  /* ======================================================================= */
+
+  const PUB_HTML_URL =
+    "https://docs.google.com/spreadsheets/d/e/2PACX-1vTXaiZRd6sKMSLZUV0n9N6Cb4XOCFtS2ZUW2IxSKsciht8VPYBQ2ViuQVZJWXjm56IYGjKJrxZs8rt0/pubhtml";
+
+  // Simulation for local testing; Okta overrides if window.email exists.
+  const SIMULATED_EMAIL = "bianca.hayes@example.com";
+  const OKTA_STUDENT_NAME    = window.firstName  || "";
+  const OKTA_STUDENT_SURNAME = window.lastName   || "";
+  const OKTA_STUDENT_EMAIL   = (window.email || SIMULATED_EMAIL || "").toLowerCase();
+  const OKTA_FULL_NAME       = `${OKTA_STUDENT_NAME} ${OKTA_STUDENT_SURNAME}`.trim();
 
   const HERO_SLOTS = 3;
   const TABLE_SLOTS = 7;
-  const TABLE_START_SLOT = HERO_SLOTS + 1; // slot "4"
+  const TABLE_START_SLOT = HERO_SLOTS + 1; // "4"
 
   const layout = new rive.Layout({ fit: rive.Fit.Layout, layoutScaleFactor: 1 });
+
   const canvas = document.getElementById('rive-canvas');
   let r = null, vm1 = null, studentVM = null, overviewVM = null;
 
@@ -34,107 +45,63 @@
   };
   let active = 'points';
   let pageIndex = 0;
-  let dataReady = false;
+
+  /* ======================================================================= */
+  /*  2) UTILS                                                               */
+  /* ======================================================================= */
 
   function resize() { try { r?.resizeDrawingSurfaceToCanvas(); } catch {} }
   addEventListener('resize', resize);
 
-  r = new rive.Rive({
-    src: 'leaderboard.riv',
-    canvas,
-    artboard: 'Dashboard',
-    stateMachines: ['State Machine 1'],
-    autoplay: true,
-    layout,
-    autoBind: true,
-    onLoad: async () => {
-      console.log('[LOAD] Rive onLoad');
-
-      resize();
-      vm1 =
-        (typeof r.viewModelInstance === 'function' ? r.viewModelInstance('View Model 1') : null) ||
-        r.viewModelInstance ||
-        r.contents?.viewModel?.('View Model 1')?.instance?.();
-
-      studentVM =
-        (typeof r.viewModelInstance === 'function' ? r.viewModelInstance('Student') : null) ||
-        vm1?.viewModel?.('Student') || vm1?.getViewModel?.('Student') ||
-        r.contents?.viewModel?.('Student')?.instance?.();
-
-      overviewVM =
-        (typeof r.viewModelInstance === 'function' ? r.viewModelInstance('Overview') : null) ||
-        vm1?.viewModel?.('Overview') || vm1?.getViewModel?.('Overview') ||
-        r.contents?.viewModel?.('Overview')?.instance?.();
-
-      console.log('[VM] vm1?', !!vm1, '| Student?', !!studentVM, '| Overview?', !!overviewVM);
-      if (!vm1) return;
-
-      setLoaded(false);
-
-      r.on?.(rive.EventType.RiveEvent, (evt) => {
-        const ev = evt?.data;
-        if (!ev || ev.type !== rive.RiveEventType.General) return;
-        console.log('[EVENT]', ev.name);
-        if (ev.name === 'PageForward') { goPage(+1); return; }
-        if (ev.name === 'PageBack')    { goPage(-1); return; }
-      });
-
-      await preloadAllThree();
-      dataReady = true;
-
-      const userId = getCurrentUserId();
-      console.log('[USER] id:', userId);
-
-      writeOverview(userId);
-
-      const mode0 = readModeFromBooleans(true);
-      setMode(mode0, { resetPage: true });
-
-      setLoaded(true);
-
-      let lastMode = mode0;
-      setInterval(() => {
-        const m = readModeFromBooleans(false);
-        if (m !== lastMode) {
-          console.log('[MODE] boolean change →', m);
-          lastMode = m;
-          setMode(m, { resetPage: true });
-        }
-      }, 300);
+  function parseCSV(text) {
+    const rows = [];
+    let row = [], field = "", inQuotes = false;
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      if (inQuotes) {
+        if (c === '"') {
+          if (text[i + 1] === '"') { field += '"'; i++; } else { inQuotes = false; }
+        } else field += c;
+      } else {
+        if (c === '"') inQuotes = true;
+        else if (c === ',') { row.push(field); field = ""; }
+        else if (c === '\n') { row.push(field); rows.push(row); row = []; field = ""; }
+        else if (c === '\r') { /* ignore */ }
+        else field += c;
+      }
     }
-  });
+    row.push(field); rows.push(row);
+    return rows;
+  }
 
-  async function preloadAllThree() {
-    console.log('[CSV] fetch pubhtml …');
-    const html = await fetch(PUB_HTML_URL).then(r => r.text());
-    const gidPoints     = findGidForSheet(html, 'Points')             ?? 0;
-    const gidAttendance = findGidForSheet(html, 'Attendance Streaks') ?? 0;
-    const gidHomework   = findGidForSheet(html, 'Homework Streaks')   ?? 0;
-    console.log('[CSV] gids:', {gidPoints, gidAttendance, gidHomework});
+  function num(v) {
+    if (v == null) return 0;
+    const n = Number(String(v).replace(/[, ]+/g, ''));
+    return isNaN(n) ? 0 : n;
+  }
 
-    const baseCsv = PUB_HTML_URL.replace(/\/pubhtml(\?.*)?$/, "/pub?single=true&output=csv");
-    const urlPoints     = `${baseCsv}&gid=${gidPoints}`;
-    const urlAttendance = `${baseCsv}&gid=${gidAttendance}`;
-    const urlHomework   = `${baseCsv}&gid=${gidHomework}`;
-    console.log('[CSV] urls:', {urlPoints, urlAttendance, urlHomework});
+  // Prefer Okta email → ?email/?user/?userId → first email in any dataset
+  function getCurrentUserId() {
+    const u = new URL(location.href);
+    const qEmail = (u.searchParams.get('email')
+                 || u.searchParams.get('user')
+                 || u.searchParams.get('userId') || "").toLowerCase();
+    if (OKTA_STUDENT_EMAIL) return OKTA_STUDENT_EMAIL;
+    if (qEmail) return qEmail;
+    const first =
+      datasets.points.rows[0]?.email
+      || datasets.attendance.rows[0]?.email
+      || datasets.homework.rows[0]?.email
+      || "";
+    return String(first).toLowerCase();
+  }
 
-    const [resP, resA, resH] = await Promise.all([fetch(urlPoints), fetch(urlAttendance), fetch(urlHomework)]);
-    console.log('[CSV] status:', resP.status, resA.status, resH.status);
-
-    const [csvPoints, csvAttend, csvHome] = await Promise.all([resP.text(), resA.text(), resH.text()]);
-
-    datasets.points.rows     = parsePoints(csvPoints);
-    datasets.attendance.rows = parseAttendance(csvAttend);
-    datasets.homework.rows   = parseHomework(csvHome);
-
-    for (const key of Object.keys(datasets)) {
-      const ds = datasets[key];
-      ds.rows.sort((a,b) => ((b.score ?? 0) - (a.score ?? 0)) || (a.i - b.i));
-      for (let i = 0; i < ds.rows.length; i++) ds.rows[i].position = i + 1;
-      ds.pages = computeTotalPages(ds.rows.length);
-      ds.map = new Map(ds.rows.map((row, i) => [row.userId, i]));
-      console.log(`[DATA] ${key}: rows=${ds.rows.length} pages=${ds.pages} sample0-2:`, ds.rows.slice(0,3));
-    }
+  // Stable 3 digits from any string (email) for avatar variation
+  function avatarDigits(id) {
+    const s = String(id || "");
+    let h = 0 >>> 0;
+    for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+    return [h % 10, Math.floor(h / 10) % 10, Math.floor(h / 100) % 10];
   }
 
   function findGidForSheet(html, sheetName) {
@@ -149,17 +116,320 @@
     return null;
   }
 
-  function writeOverview(userId) {
-    if (!overviewVM) { console.warn('[OVERVIEW] VM missing'); return; }
+  function computeTotalPages(totalRows) {
+    const remaining = Math.max(0, totalRows - HERO_SLOTS);
+    return Math.max(1, Math.ceil(remaining / TABLE_SLOTS));
+  }
 
+  /* ======================================================================= */
+  /*  3) PARSERS (Email, First Name, Surname)                                 */
+  /* ======================================================================= */
+
+  function parsePoints(csvText) {
+    const rows = parseCSV(csvText).filter(r => r.length && r.some(c => (c || '').trim() !== ''));
+    if (!rows.length) return [];
+    const headers = rows[0].map(h => (h || '').trim().toLowerCase());
+    const idx = name => headers.indexOf(name);
+
+    const emailI  = idx('email');
+    const firstI  = idx('first name');
+    const surI    = idx('surname');
+    const lessonI = idx('lesson attendance');
+    const moduleI = idx('module completion');
+    const hwI     = idx('homework');
+    const assessI = idx('assessment submission');
+    const scoreI  = idx('score');
+    const changeI = idx('change');
+
+    const out = rows.slice(1).map((r,i) => {
+      const email = String(r[emailI] || '').trim().toLowerCase();
+      const first = String(r[firstI] || '').trim();
+      const sur   = String(r[surI]   || '').trim();
+      return {
+        i,
+        email,
+        userId: email,
+        firstName: first,
+        surname: sur,
+        name: `${first} ${sur}`.trim(),
+        lessonAttendance:     num(r[lessonI]),
+        moduleCompletion:     num(r[moduleI]),
+        homework:             num(r[hwI]),
+        assessmentSubmission: num(r[assessI]),
+        score:                num(r[scoreI]),
+        change:               num(r[changeI]),
+      };
+    }).filter(x => x.email);
+
+    return out;
+  }
+
+  function parseAttendance(csvText) {
+    const rows = parseCSV(csvText).filter(r => r.length && r.some(c => (c || '').trim() !== ''));
+    if (!rows.length) return [];
+    const headers = rows[0].map(h => (h || '').trim().toLowerCase());
+    const idx = name => headers.indexOf(name);
+
+    const emailI = idx('email');
+    const firstI = idx('first name');
+    const surI   = idx('surname');
+    const levelI = idx('attendance level');
+    const dayI   = idx('attendance day');
+    const scoreI = idx('score');
+
+    const out = rows.slice(1).map((r,i) => {
+      const email = String(r[emailI] || '').trim().toLowerCase();
+      const first = String(r[firstI] || '').trim();
+      const sur   = String(r[surI]   || '').trim();
+      return {
+        i,
+        email,
+        userId: email,
+        firstName: first,
+        surname: sur,
+        name: `${first} ${sur}`.trim(),
+        attendanceLevel: num(r[levelI]),
+        attendanceDay:   num(r[dayI]),
+        score:           num(scoreI >= 0 ? r[scoreI] : 0),
+        change:          0,
+      };
+    }).filter(x => x.email);
+
+    return out;
+  }
+
+  function parseHomework(csvText) {
+    const rows = parseCSV(csvText).filter(r => r.length && r.some(c => (c || '').trim() !== ''));
+    if (!rows.length) return [];
+    const headers = rows[0].map(h => (h || '').trim().toLowerCase());
+    const idx = name => headers.indexOf(name);
+
+    const emailI = idx('email');
+    const firstI = idx('first name');
+    const surI   = idx('surname');
+    const levelI = idx('homework level');
+    const dayI   = idx('homework day');
+    const scoreI = idx('score');
+
+    const out = rows.slice(1).map((r,i) => {
+      const email = String(r[emailI] || '').trim().toLowerCase();
+      const first = String(r[firstI] || '').trim();
+      const sur   = String(r[surI]   || '').trim();
+      return {
+        i,
+        email,
+        userId: email,
+        firstName: first,
+        surname: sur,
+        name: `${first} ${sur}`.trim(),
+        homeworkLevel: num(r[levelI]),
+        homeworkDay:   num(r[dayI]),
+        score:         num(scoreI >= 0 ? r[scoreI] : 0),
+        change:        0,
+      };
+    }).filter(x => x.email);
+
+    return out;
+  }
+
+  /* ======================================================================= */
+  /*  4) DATA LOADING                                                         */
+  /* ======================================================================= */
+
+  async function preloadAllThree() {
+    const html = await fetch(PUB_HTML_URL).then(r => r.text());
+    const gidPoints     = findGidForSheet(html, 'Points')             ?? 0;
+    const gidAttendance = findGidForSheet(html, 'Attendance Streaks') ?? 0;
+    const gidHomework   = findGidForSheet(html, 'Homework Streaks')   ?? 0;
+
+    const baseCsv = PUB_HTML_URL.replace(/\/pubhtml(\?.*)?$/, "/pub?single=true&output=csv");
+    const [resP, resA, resH] = await Promise.all([
+      fetch(`${baseCsv}&gid=${gidPoints}`),
+      fetch(`${baseCsv}&gid=${gidAttendance}`),
+      fetch(`${baseCsv}&gid=${gidHomework}`)
+    ]);
+    const [csvPoints, csvAttend, csvHome] = await Promise.all([resP.text(), resA.text(), resH.text()]);
+
+    datasets.points.rows     = parsePoints(csvPoints);
+    datasets.attendance.rows = parseAttendance(csvAttend);
+    datasets.homework.rows   = parseHomework(csvHome);
+
+    // Sort each dataset appropriately, set positions/pages/maps
+    for (const key of Object.keys(datasets)) {
+      const ds = datasets[key];
+
+      if (key === 'points') {
+        ds.rows.sort((a,b) => ((b.score ?? 0) - (a.score ?? 0)) || (a.i - b.i));
+      } else if (key === 'attendance') {
+        ds.rows.sort((a,b) =>
+          ((b.attendanceLevel ?? 0) - (a.attendanceLevel ?? 0)) ||
+          ((b.attendanceDay   ?? 0) - (a.attendanceDay   ?? 0)) ||
+          (a.i - b.i)
+        );
+      } else if (key === 'homework') {
+        ds.rows.sort((a,b) =>
+          ((b.homeworkLevel ?? 0) - (a.homeworkLevel ?? 0)) ||
+          ((b.homeworkDay   ?? 0) - (a.homeworkDay   ?? 0)) ||
+          (a.i - b.i)
+        );
+      }
+
+      for (let i = 0; i < ds.rows.length; i++) ds.rows[i].position = i + 1;
+      ds.pages = computeTotalPages(ds.rows.length);
+      ds.map   = new Map(ds.rows.map((row, i) => [row.userId, i]));
+    }
+  }
+
+  /* ======================================================================= */
+  /*  5) RIVE BOOTSTRAP                                                       */
+  /* ======================================================================= */
+
+  r = new rive.Rive({
+    src: 'leaderboard.riv',
+    canvas,
+    artboard: 'Dashboard',
+    stateMachines: ['State Machine 1'],
+    autoplay: true,
+    layout,
+    autoBind: true,
+    onLoad: async () => {
+      resize();
+
+      vm1 =
+        (typeof r.viewModelInstance === 'function' ? r.viewModelInstance('View Model 1') : null) ||
+        r.viewModelInstance ||
+        r.contents?.viewModel?.('View Model 1')?.instance?.();
+
+      overviewVM =
+        (typeof r.viewModelInstance === 'function' ? r.viewModelInstance('Overview') : null) ||
+        vm1?.viewModel?.('Overview') || vm1?.getViewModel?.('Overview') ||
+        r.contents?.viewModel?.('Overview')?.instance?.();
+
+      studentVM = resolveStudentVM(r, vm1);
+
+      if (!vm1) return;
+
+      setLoaded(false);
+
+      r.on?.(rive.EventType.RiveEvent, (evt) => {
+        const ev = evt?.data;
+        if (!ev || ev.type !== rive.RiveEventType.General) return;
+        if (ev.name === 'PageForward') { goPage(+1); return; }
+        if (ev.name === 'PageBack')    { goPage(-1); return; }
+      });
+
+      await preloadAllThree();
+
+      const userId = getCurrentUserId();
+      writeOverview(userId);
+
+      const mode0 = readModeFromBooleans(true);
+      setMode(mode0, { resetPage: true });
+
+      setLoaded(true);
+
+      // Poll for Rive-initiated boolean flips
+      let lastMode = mode0;
+      setInterval(() => {
+        const m = readModeFromBooleans(false);
+        if (m !== lastMode) {
+          lastMode = m;
+          setMode(m, { resetPage: true });
+        }
+      }, 300);
+    }
+  });
+
+  function resolveStudentVM(r, vm1) {
+    const candidates = [];
+    try { const v = vm1?.viewModel?.('Student') || vm1?.getViewModel?.('Student'); if (v) candidates.push(['vm1->Student', v]); } catch {}
+    try { const v = (typeof r.viewModelInstance === 'function' ? r.viewModelInstance('Student') : r.viewModelInstance); if (v) candidates.push(['r.viewModelInstance(Student)', v]); } catch {}
+    try { const v = r.contents?.viewModel?.('Student')?.instance?.(); if (v) candidates.push(['contents->Student.instance()', v]); } catch {}
+    try { const ui = vm1?.viewModel?.('UserInfo') || vm1?.getViewModel?.('UserInfo'); const v = ui?.viewModel?.('Student') || ui?.getViewModel?.('Student'); if (v) candidates.push(['vm1->UserInfo->Student', v]); } catch {}
+    const hit = candidates.find(([_, inst]) => !!inst) || null;
+    return hit ? hit[1] : null;
+  }
+
+  /* ======================================================================= */
+  /*  6) MODE / PAGINATION / OVERVIEW                                         */
+  /* ======================================================================= */
+
+  function readModeFromBooleans(verbose=false) {
+    const getB = (k) => {
+      const b = (vm1?.boolean?.(k) ?? vm1?.getBoolean?.(k));
+      return b && 'value' in b ? !!b.value : false;
+    };
+    const p = getB('isPoints');
+    const a = getB('isAttendance');
+    const h = getB('isHomework');
+    const mode = p ? 'points' : a ? 'attendance' : h ? 'homework' : 'points';
+    if (verbose) console.log('[MODE] flags →', {isPoints:p, isAttendance:a, isHomework:h, mode});
+    return mode;
+  }
+
+  // Toggle Student.PointsvsStreaks across any visible Student instance(s)
+  function setStudentPointsVsStreaks(isPointsMode) {
+    const tries = [];
+    tries.push(studentVM);
+    tries.push((typeof r.viewModelInstance === 'function' ? r.viewModelInstance('Student') : r.viewModelInstance) || null);
+    tries.push(r.contents?.viewModel?.('Student')?.instance?.() || null);
+    const ui = vm1?.viewModel?.('UserInfo') || vm1?.getViewModel?.('UserInfo');
+    tries.push(ui?.viewModel?.('Student') || ui?.getViewModel?.('Student') || null);
+    const uniq = [...new Set(tries.filter(Boolean))];
+    for (const inst of uniq) {
+      const prop = inst?.boolean?.('PointsvsStreaks') ?? inst?.getBoolean?.('PointsvsStreaks');
+      if (prop && 'value' in prop) prop.value = !!isPointsMode;
+    }
+  }
+
+  function setMode(which, { resetPage }) {
+    active = which;
+
+    // Points → true, Streaks → false
+    setStudentPointsVsStreaks(active === 'points');
+
+    const ds = datasets[active];
+    if (!ds) { console.warn('[MODE] unknown dataset', which); return; }
+
+    ds.pages = computeTotalPages(ds.rows.length);
+    pageIndex = resetPage ? 0 : Math.min(pageIndex, ds.pages - 1);
+
+    renderHero(ds.rows);
+
+    const userId = getCurrentUserId();
+    const uIdx = ds.map.get(userId);
+    writeStudentEverywhere((typeof uIdx === 'number') ? ds.rows[uIdx] : null);
+
+    writePageNumbers(ds.pages);
+    renderTable(ds.rows);
+    firePlay();
+  }
+
+  function goPage(delta) {
+    const ds = datasets[active];
+    const next = Math.min(Math.max(pageIndex + delta, 0), ds.pages - 1);
+    if (next === pageIndex) return;
+    pageIndex = next;
+    writePageNumbers(ds.pages);
+    renderTable(ds.rows);
+    firePlay();
+  }
+
+  function writePageNumbers(totalPages) {
+    const pi = vm1?.number?.('PageIndex')  ?? vm1?.getNumber?.('PageIndex');
+    const tp = vm1?.number?.('TotalPages') ?? vm1?.getNumber?.('TotalPages');
+    if (pi) pi.value = pageIndex + 1;
+    if (tp) tp.value = totalPages;
+  }
+
+  function writeOverview(userId) {
+    if (!overviewVM) return;
     const pIdx = datasets.points.map.get(userId);
     const aIdx = datasets.attendance.map.get(userId);
     const hIdx = datasets.homework.map.get(userId);
     const p = typeof pIdx === 'number' ? datasets.points.rows[pIdx] : null;
     const a = typeof aIdx === 'number' ? datasets.attendance.rows[aIdx] : null;
     const h = typeof hIdx === 'number' ? datasets.homework.rows[hIdx] : null;
-
-    console.log('[OVERVIEW] pIdx/aIdx/hIdx:', pIdx, aIdx, hIdx, '| rows:', {p, a, h});
 
     const v = {
       StudentName:          overviewVM.string?.('StudentName')       ?? overviewVM.getString?.('StudentName'),
@@ -187,60 +457,13 @@
     if (v.HomeworkStreak)       v.HomeworkStreak.value       = h?.homeworkDay     ?? 0;
   }
 
-  function readModeFromBooleans(verbose=false) {
-    const getB = (k) => {
-      const b = (vm1?.boolean?.(k) ?? vm1?.getBoolean?.(k));
-      return b && 'value' in b ? !!b.value : false;
-    };
-    const p = getB('isPoints');
-    const a = getB('isAttendance');
-    const h = getB('isHomework');
-    const mode = p ? 'points' : a ? 'attendance' : h ? 'homework' : 'points';
-    if (verbose) console.log('[MODE] flags →', {isPoints:p, isAttendance:a, isHomework:h, mode});
-    return mode;
-  }
+  /* ======================================================================= */
+  /*  7) RENDERING (rows + student panel)                                     */
+  /* ======================================================================= */
 
-  function setMode(which, { resetPage }) {
-    active = which;
-    const ds = datasets[active];
-    if (!ds) { console.warn('[MODE] unknown dataset', which); return; }
-
-    ds.pages = computeTotalPages(ds.rows.length);
-    pageIndex = resetPage ? 0 : Math.min(pageIndex, ds.pages - 1);
-
-    console.log('[MODE] setMode:', which, '| rows:', ds.rows.length, '| pages:', ds.pages, '| pageIndex:', pageIndex);
-
-    renderHero(ds.rows);
-    const userId = getCurrentUserId();
-    const uIdx = ds.map.get(userId);
-    console.log('[STUDENT] userId:', userId, '| idx:', uIdx);
-    if (studentVM) writeStudent(studentVM, (typeof uIdx === 'number') ? ds.rows[uIdx] : null);
-
-    writePageNumbers(ds.pages);
-    renderTable(ds.rows);
-    firePlay();
-  }
-
-  function computeTotalPages(totalRows) {
-    const remaining = Math.max(0, totalRows - HERO_SLOTS);
-    return Math.max(1, Math.ceil(remaining / TABLE_SLOTS));
-  }
-
-  function goPage(delta) {
-    const ds = datasets[active];
-    const next = Math.min(Math.max(pageIndex + delta, 0), ds.pages - 1);
-    if (next === pageIndex) return;
-    pageIndex = next;
-    writePageNumbers(ds.pages);
-    renderTable(ds.rows);
-    firePlay();
-  }
-
-  function writePageNumbers(totalPages) {
-    const pi = vm1?.number?.('PageIndex')  ?? vm1?.getNumber?.('PageIndex');
-    const tp = vm1?.number?.('TotalPages') ?? vm1?.getNumber?.('TotalPages');
-    if (pi) pi.value = pageIndex + 1;
-    if (tp) tp.value = totalPages;
+  function setEntryVisible(entryVM, show) {
+    const vis = entryVM?.boolean?.('Visible') ?? entryVM?.getBoolean?.('Visible');
+    if (vis && 'value' in vis) vis.value = !!show;
   }
 
   function renderHero(rows) {
@@ -248,24 +471,32 @@
       const slotName = String(i + 1);
       const entryVM = vm1?.viewModel?.(slotName) || vm1?.getViewModel?.(slotName);
       const row = rows[i];
-      console.log(`[HERO] slot ${slotName} → VM?`, !!entryVM, '| row?', !!row, row);
       if (!entryVM) continue;
+      setEntryVisible(entryVM, !!row);
       writeEntry(entryVM, row, i + 1);
     }
   }
 
   function renderTable(rows) {
     const firstIdx = HERO_SLOTS + pageIndex * TABLE_SLOTS;
-    console.log('[TABLE] firstIdx:', firstIdx, '| pageIndex:', pageIndex);
-    for (let j = 0; j < TABLE_SLOTS; j++) {
-      const slot = TABLE_START_SLOT + j; // 4..10
-      const slotName = String(slot);
-      const entryVM = vm1?.viewModel?.(slotName) || vm1?.getViewModel?.(slotName);
+    const remaining = Math.max(0, rows.length - HERO_SLOTS - pageIndex * TABLE_SLOTS);
+    const rowsThisPage = Math.min(TABLE_SLOTS, remaining);
+
+    for (let j = 0; j < rowsThisPage; j++) {
+      const slot = TABLE_START_SLOT + j;
+      const entryVM = vm1?.viewModel?.(String(slot)) || vm1?.getViewModel?.(String(slot));
+      if (!entryVM) continue;
       const row = rows[firstIdx + j];
       const fallbackPos = HERO_SLOTS + (pageIndex * TABLE_SLOTS) + j + 1;
-      console.log(`[ROW] slot ${slotName} → VM?`, !!entryVM, '| row?', !!row, row);
-      if (!entryVM) continue;
+      setEntryVisible(entryVM, true);
       writeEntry(entryVM, row, fallbackPos);
+    }
+    for (let j = rowsThisPage; j < TABLE_SLOTS; j++) {
+      const slot = TABLE_START_SLOT + j;
+      const entryVM = vm1?.viewModel?.(String(slot)) || vm1?.getViewModel?.(String(slot));
+      if (!entryVM) continue;
+      setEntryVisible(entryVM, false);
+      writeEntry(entryVM, null, 0);
     }
   }
 
@@ -280,7 +511,6 @@
     const laProp      = entryVM.number?.('LessonAttendance')      ?? entryVM.getNumber?.('LessonAttendance');
 
     if (row) {
-      console.log('[WRITE] entry', {pos: row.position, name: row.name, userId: row.userId, mode: active});
       if (posProp)  posProp.value  = row.position ?? fallbackPosition ?? 0;
       if (nameProp) nameProp.value = row.name ?? '';
 
@@ -317,17 +547,29 @@
         if (hairPropE) hairPropE.value = dC;
       }
     } else {
-      if (posProp)   posProp.value   = fallbackPosition || 0;
-      if (nameProp)  nameProp.value  = '';
-      if (scoreProp) scoreProp.value = 0;
+      if (posProp)    posProp.value    = fallbackPosition || 0;
+      if (nameProp)   nameProp.value   = '';
+      if (scoreProp)  scoreProp.value  = 0;
       if (changeProp) changeProp.value = 0;
-      if (laProp) laProp.value = 0;
-      if (mcProp) mcProp.value = 0;
-      if (hwProp) hwProp.value = 0;
-      if (asProp) asProp.value = 0;
+      if (laProp)     laProp.value     = 0;
+      if (mcProp)     mcProp.value     = 0;
+      if (hwProp)     hwProp.value     = 0;
+      if (asProp)     asProp.value     = 0;
     }
   }
 
+  function writeStudentEverywhere(row) {
+    const tries = [];
+    tries.push(studentVM);
+    tries.push((typeof r.viewModelInstance === 'function' ? r.viewModelInstance('Student') : r.viewModelInstance) || null);
+    tries.push(r.contents?.viewModel?.('Student')?.instance?.() || null);
+    const ui = vm1?.viewModel?.('UserInfo') || vm1?.getViewModel?.('UserInfo');
+    tries.push(ui?.viewModel?.('Student') || ui?.getViewModel?.('Student') || null);
+    const uniq = [...new Set(tries.filter(Boolean))];
+    for (const inst of uniq) writeStudent(inst, row);
+  }
+
+  // Student panel: Points → score/change; Streaks → level/day into score/change
   function writeStudent(svm, row) {
     const sName  = svm?.string?.('StudentName')     ?? svm?.getString?.('StudentName');
     const sPos   = svm?.number?.('StudentPosition') ?? svm?.getNumber?.('StudentPosition');
@@ -335,7 +577,6 @@
     const sChg   = svm?.number?.('StudentChange')   ?? svm?.getNumber?.('StudentChange');
 
     if (!row) {
-      console.warn('[STUDENT] no row to write');
       if (sName)  sName.value  = '';
       if (sPos)   sPos.value   = 0;
       if (sScore) sScore.value = 0;
@@ -343,11 +584,24 @@
       return;
     }
 
-    console.log('[STUDENT] write', {name: row.name, pos: row.position, uid: row.userId, mode: active});
     if (sName) sName.value = row.name ?? '';
     if (sPos)  sPos.value  = row.position ?? 0;
-    if (sScore) sScore.value = row.score ?? 0;
-    if (sChg)   sChg.value   = (active === 'points') ? (row.change ?? 0) : 0;
+
+    if (active === 'points') {
+      if (sScore) sScore.value = row.score ?? 0;
+      if (sChg)   sChg.value   = row.change ?? 0;
+    } else if (active === 'attendance') {
+      if (sScore) sScore.value = row.attendanceLevel ?? 0;
+      if (sChg)   sChg.value   = row.attendanceDay   ?? 0;
+    } else if (active === 'homework') {
+      if (sScore) sScore.value = row.homeworkLevel ?? 0;
+      if (sChg)   sChg.value   = row.homeworkDay   ?? 0;
+    }
+
+    // Prefer Okta name if this is the logged-in viewer
+    if (row.email && row.email === OKTA_STUDENT_EMAIL && OKTA_FULL_NAME && sName) {
+      sName.value = OKTA_FULL_NAME;
+    }
 
     const sSkinDir = svm?.number?.('Skin')      ?? svm?.getNumber?.('Skin');
     const sBodyDir = svm?.number?.('BodyShape') ?? svm?.getNumber?.('BodyShape');
@@ -360,120 +614,9 @@
     }
   }
 
-  // ---------- Parsers ----------
-  function parsePoints(csvText) {
-    const rows = parseCSV(csvText).filter(r => r.length && r.some(c => (c || '').trim() !== ''));
-    if (!rows.length) return [];
-    const headers = rows[0].map(h => (h || '').trim().toLowerCase());
-    const idx = name => headers.indexOf(name);
-    const nameI   = idx('name');
-    const userI   = idx('userid');
-    const scoreI  = idx('score');
-    const changeI = idx('change');
-    const lessonI = idx('lesson attendance');
-    const moduleI = idx('module completion');
-    const hwI     = idx('homework');
-    const assessI = idx('assessment submission');
-    const out = rows.slice(1).map((r,i) => ({
-      i,
-      userId: String(r[userI] ?? '').trim(),
-      name: String(r[nameI] ?? '').trim(),
-      score: num(r[scoreI]),
-      change: num(r[changeI]),
-      lessonAttendance: num(r[lessonI]),
-      moduleCompletion: num(r[moduleI]),
-      homework: num(r[hwI]),
-      assessmentSubmission: num(r[assessI]),
-    })).filter(x => x.name);
-    console.log('[PARSE:points] rows:', out.length, 'first:', out[0]);
-    return out;
-  }
-
-  function parseAttendance(csvText) {
-    const rows = parseCSV(csvText).filter(r => r.length && r.some(c => (c || '').trim() !== ''));
-    if (!rows.length) return [];
-    const headers = rows[0].map(h => (h || '').trim().toLowerCase());
-    const idx = name => headers.indexOf(name);
-    const nameI   = idx('name');
-    const userI   = idx('userid');
-    const levelI  = idx('attendance level');
-    const dayI    = idx('attendance day');
-    const scoreI  = idx('score');
-    const out = rows.slice(1).map((r,i) => ({
-      i,
-      userId: String(r[userI] ?? '').trim(),
-      name: String(r[nameI] ?? '').trim(),
-      attendanceLevel: num(r[levelI]),
-      attendanceDay:   num(r[dayI]),
-      score: num(scoreI >= 0 ? r[scoreI] : 0),
-      change: 0,
-    })).filter(x => x.name);
-    console.log('[PARSE:attendance] rows:', out.length, 'first:', out[0]);
-    return out;
-  }
-
-  function parseHomework(csvText) {
-    const rows = parseCSV(csvText).filter(r => r.length && r.some(c => (c || '').trim() !== ''));
-    if (!rows.length) return [];
-    const headers = rows[0].map(h => (h || '').trim().toLowerCase());
-    const idx = name => headers.indexOf(name);
-    const nameI   = idx('name');
-    const userI   = idx('userid');
-    const levelI  = idx('homework level');
-    const dayI    = idx('homework day');
-    const scoreI  = idx('score');
-    const out = rows.slice(1).map((r,i) => ({
-      i,
-      userId: String(r[userI] ?? '').trim(),
-      name: String(r[nameI] ?? '').trim(),
-      homeworkLevel: num(r[levelI]),
-      homeworkDay:   num(r[dayI]),
-      score: num(scoreI >= 0 ? r[scoreI] : 0),
-      change: 0,
-    })).filter(x => x.name);
-    console.log('[PARSE:homework] rows:', out.length, 'first:', out[0]);
-    return out;
-  }
-
-  // ---------- CSV helpers & misc ----------
-  function parseCSV(text) {
-    const rows = [];
-    let row = [], field = "", inQuotes = false;
-    for (let i = 0; i < text.length; i++) {
-      const c = text[i];
-      if (inQuotes) {
-        if (c === '"') {
-          if (text[i + 1] === '"') { field += '"'; i++; }
-          else { inQuotes = false; }
-        } else field += c;
-      } else {
-        if (c === '"') inQuotes = true;
-        else if (c === ',') { row.push(field); field = ""; }
-        else if (c === '\n') { row.push(field); rows.push(row); row = []; field = ""; }
-        else if (c === '\r') { /* ignore */ }
-        else field += c;
-      }
-    }
-    row.push(field);
-    rows.push(row);
-    return rows;
-  }
-
-  function num(v) {
-    if (v == null) return 0;
-    const n = Number(String(v).replace(/[, ]+/g, ''));
-    return isNaN(n) ? 0 : n;
-  }
-
-  function getCurrentUserId() {
-    const u = new URL(location.href);
-    return u.searchParams.get('userId') || u.searchParams.get('user') || DEFAULT_USER_ID;
-  }
-
-  function avatarDigits(userId) {
-    const m = String(userId || '').match(/(\d)(\d)(\d)$/);
-    return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : [0, 0, 0];
-  }
+  /* ======================================================================= */
+  /*  8) RIVE BRIDGES                                                         */
+  /* ======================================================================= */
 
   function firePlay() {
     const play = vm1?.trigger?.('Play') || vm1?.getTrigger?.('Play');
@@ -485,6 +628,6 @@
     const b = vm1?.boolean?.('isLoaded') ?? vm1?.getBoolean?.('isLoaded');
     if (b && 'value' in b) b.value = !!flag;
   }
-</script>
+  </script>
 </body>
 </html>
