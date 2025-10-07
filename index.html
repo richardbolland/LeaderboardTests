@@ -19,26 +19,22 @@
   /*  1) CONFIG / OKTA + FALLBACK (user_login_id)                            */
   /* ======================================================================= */
 
-  // Your "Published to web" link (entire document)
   const PUBLISHED_CSV_WHOLE_DOC =
     "https://docs.google.com/spreadsheets/d/e/2PACX-1vTPvCfe-DO63KzdF7tixoFLCFY13ufNSsMEr89LF11rcATicR_tK7PZK-r7HAV4D4_iajXRQG_vBu23/pub?output=csv";
 
-  // Derive HTML (for gid discovery) and a base CSV endpoint
   const PUB_HTML_URL = PUBLISHED_CSV_WHOLE_DOC.replace(/\/pub\?output=csv.*/i, "/pubhtml");
   const BASE_CSV_URL = PUBLISHED_CSV_WHOLE_DOC.replace(/\/pub\?output=csv.*/i, "/pub?single=true&output=csv");
 
-  // Okta-provided identity (production). If absent, we fall back to SIMULATED_USER_LOGIN_ID.
   const OKTA_STUDENT_NAME    = window.firstName  || "";
   const OKTA_STUDENT_SURNAME = window.lastName   || "";
   const OKTA_STUDENT_EMAIL   = (window.email || "").toLowerCase();
   const OKTA_FULL_NAME       = `${OKTA_STUDENT_NAME} ${OKTA_STUDENT_SURNAME}`.trim();
 
-  // Quick test fallback: target a specific user_login_id (email-like) here
-  const SIMULATED_USER_LOGIN_ID = "test.test@teneo.school"; // <-- edit this for local testing
+  const SIMULATED_USER_LOGIN_ID = "teneotest@teneoeducation.com"; // for local testing
 
   const HERO_SLOTS = 3;
   const TABLE_SLOTS = 7;
-  const TABLE_START_SLOT = HERO_SLOTS + 1; // "4"
+  const TABLE_START_SLOT = HERO_SLOTS + 1;
 
   const layout = new rive.Layout({ fit: rive.Fit.Layout, layoutScaleFactor: 1 });
 
@@ -46,9 +42,9 @@
   let r = null, vm1 = null, studentVM = null, overviewVM = null;
 
   const datasets = {
-    points:     { rows: [], pages: 1, map: new Map(), mapCanvas: new Map() },
-    attendance: { rows: [], pages: 1, map: new Map(), mapCanvas: new Map() },
-    homework:   { rows: [], pages: 1, map: new Map(), mapCanvas: new Map() },
+    points:     { rows: [], pages: 1, map: new Map() },
+    attendance: { rows: [], pages: 1, map: new Map() },
+    homework:   { rows: [], pages: 1, map: new Map() },
   };
   let active = 'points';
   let pageIndex = 0;
@@ -81,32 +77,50 @@
     return rows;
   }
 
-  // Strict number (handles "1,234" and spaces)
+  // normalize header matching (handle dots, spaces, case)
+  function idxAny(headers, patterns) {
+    const norm = s => String(s || '')
+      .toLowerCase()
+      .replace(/\./g, '')        // "No.of" -> "Noof"
+      .replace(/\s+/g, ' ')
+      .trim();
+    const H = headers.map(h => norm(h));
+    for (const p of patterns) {
+      const target = norm(p);
+      const i = H.indexOf(target);
+      if (i !== -1) return i;
+    }
+    return -1;
+  }
+
   function num(v) {
     if (v == null) return 0;
     const n = Number(String(v).replace(/[, ]+/g, ''));
     return isNaN(n) ? 0 : n;
   }
 
-  // Loose number extractor: first numeric token in a cell ("Level 3 (Gold)" -> 3)
   function numLoose(v) {
     const m = String(v ?? '').match(/-?\d+(\.\d+)?/);
     return m ? Number(m[0]) : 0;
   }
 
-  // Avatar digits from canvas_user_id → last 3 digits; fallback to hash(userId)
-  function avatarDigitsFromCanvas(canvasId, userIdFallback) {
-    const m = String(canvasId || "").match(/(\d{1,3})$/); // last up to 3 digits
-    if (m) {
-      const s = m[1].padStart(3, "0");
-      return [Number(s[2]), Number(s[1]), Number(s[0])]; // Skin / Body / Hair
-    }
-    // fallback: stable hash on userId
-    const s = String(userIdFallback || "");
-    let h = 0 >>> 0;
-    for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
-    return [h % 10, Math.floor(h / 10) % 10, Math.floor(h / 100) % 10];
-  }
+  // === Points status helpers (Explorer | Hero | Icon | Legend)
+function normalizePointsStatus(s) {
+  const v = String(s || '').trim().toLowerCase();
+  if (v.startsWith('explorer')) return 'Explorer';
+  if (v.startsWith('hero'))     return 'Hero';
+  if (v.startsWith('icon'))     return 'Icon';
+  if (v.startsWith('legend'))   return 'Legend';
+  return null;
+}
+
+function getPointsStatusForUser(userId) {
+  const id = String(userId || '').toLowerCase();
+  const i = datasets.points?.map?.get(id);
+  const row = (i != null) ? datasets.points.rows[i] : null;
+  return normalizePointsStatus(row?.status);
+}
+
 
   function findGidForSheet(html, sheetName) {
     const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -136,12 +150,10 @@
     return res.text();
   }
 
-  // Identity preference: Okta email first; else SIMULATED_USER_LOGIN_ID (testing)
   function getPreferredUserId() {
     return (OKTA_STUDENT_EMAIL || SIMULATED_USER_LOGIN_ID || "").toLowerCase();
   }
 
-  // STRICT lookup by user_login_id (email-like). No leader/canvas fallback.
   function pickRowByUserStrict(ds, userId) {
     if (!ds || !userId) return null;
     if (ds.map && ds.map.has(userId)) {
@@ -150,166 +162,145 @@
     return null;
   }
 
-  // Build a placeholder row for the Student/Overview panels if the user is missing in a dataset
   function synthesizeUserRow(userId) {
     const fromPoints = pickRowByUserStrict(datasets.points, userId);
     const name   = fromPoints?.name || (OKTA_FULL_NAME || "Student");
-    const canvas = (fromPoints?.canvasId || "").toString();
 
     return {
       i: -1,
       position: 0,
       userId: userId,
       email: userId,
-      canvasId: canvas,
       name,
-      // points totals
       lessonAttendance: 0,
       moduleCompletion: 0,
       assessmentSubmission: 0,
       homework: 0,
       score: 0,
       change: 0,
-      // attendance streaks
       attendanceLevel: 0,
       attendanceDay: 0,
-      // homework streaks
       homeworkLevel: 0,
       homeworkDay: 0,
+      status: ''
     };
   }
 
   /* ======================================================================= */
-  /*  3) PARSERS (NEW HEADERS)                                               */
+  /*  3) PARSERS (ALIGNED TO YOUR HEADERS)                                   */
   /* ======================================================================= */
 
-  // POINTS (main sheet)
-  // Columns used: user_login_id, canvas_user_id, Student Name,
-  // Lesson Attendance, Module Completion, Assessment Submission, homework_points,
-  // Change (from last week to this week)
+  // POINTS
+  // canvas_user_id, user_login_id, dcid, student_number, curriculum, phase, Email Address,
+  // grade, Student Name, Current Position, Last Week Position,
+  // Change (from last week to this week), Lesson Attendance, Assessment Submission,
+  // Module Completion, Current Total Points, Last Weeks Total Points, Points Change,
+  // Ranking %, Status, homework_completion, Rewards Percentage, Rewards Earned
   function parsePoints(csvText) {
     const rows = parseCSV(csvText).filter(r => r.length && r.some(c => (c || '').trim() !== ''));
     if (!rows.length) return [];
-    const headers = rows[0].map(h => (h || '').trim().toLowerCase());
-    const idx = name => headers.indexOf(name.toLowerCase());
+    const headersRaw = rows[0].map(h => (h || '').trim());
 
-    const idI      = idx('user_login_id');
-    const canvasI  = idx('canvas_user_id');
-    const nameI    = idx('student name');
-    const lessonI  = idx('lesson attendance');
-    const moduleI  = idx('module completion');
-    const assessI  = idx('assessment submission');
-    const hwPtsI   = idx('homework_points');
-    const changeI  = idx('change (from last week to this week)');
-    const statusI  = idx('status');
+    const idI        = idxAny(headersRaw, ['user_login_id']);
+    const nameI      = idxAny(headersRaw, ['Student Name']);
 
+    const curPosI    = idxAny(headersRaw, ['Current Position']);
+    const lastPosI   = idxAny(headersRaw, ['Last Week Position']);
+    const changeI    = idxAny(headersRaw, ['Change (from last week to this week)']);
+
+    const lessonI    = idxAny(headersRaw, ['Lesson Attendance']);
+    const assessI    = idxAny(headersRaw, ['Assessment Submission']);
+    const moduleI    = idxAny(headersRaw, ['Module Completion']);
+    const curTotalI  = idxAny(headersRaw, ['Current Total Points']);
+    const lastTotalI = idxAny(headersRaw, ['Last Weeks Total Points']);
+    const ptsChangeI = idxAny(headersRaw, ['Points Change']);
+    const rankPctI   = idxAny(headersRaw, ['Ranking %']);
+    const statusI    = idxAny(headersRaw, ['Status']);
+    const hwCompI    = idxAny(headersRaw, ['homework_completion']);
 
     const out = rows.slice(1).map((r,i) => {
       const userId = String(r[idI] || '').trim().toLowerCase();
       if (!userId) return null;
-      const canvas = String(r[canvasI] || '').trim();
       const name   = String(r[nameI] || '').trim();
 
-      const lesson = numLoose(r[lessonI]);
-      const module = numLoose(r[moduleI]);
-      const assess = numLoose(r[assessI]);
-      const hwpts  = numLoose(r[hwPtsI]);
-      const score  = lesson + module + assess + hwpts; // computed total
-      const change = numLoose(r[changeI]);
+      const lesson = lessonI    !== -1 ? numLoose(r[lessonI])    : 0;
+      const assess = assessI    !== -1 ? numLoose(r[assessI])    : 0;
+      const module = moduleI    !== -1 ? numLoose(r[moduleI])    : 0;
+      const hwcomp = hwCompI    !== -1 ? numLoose(r[hwCompI])    : 0;
+
+      // score from "Current Total Points"
+      const score  = curTotalI  !== -1 ? num(r[curTotalI])       : 0;
+
+      // change from "Change (from last week to this week)" if present
+      const change = changeI    !== -1 ? numLoose(r[changeI])    : 0;
+
+      const position = curPosI  !== -1 ? numLoose(r[curPosI])    : undefined;
 
       return {
         i,
         userId,
         email: userId,
-        canvasId: canvas,
         name,
         firstName: name,
         surname: '',
         lessonAttendance:     lesson,
-        moduleCompletion:     module,
         assessmentSubmission: assess,
-        homework:             hwpts,
+        moduleCompletion:     module,
+        homework:             hwcomp,
         score,
         change,
-        status: String(r[statusI] || '').trim()
-
+        position,
+        status: String((statusI !== -1 ? r[statusI] : '') || '').trim()
       };
     }).filter(Boolean);
 
     return out;
   }
 
-  // ATTENDANCE STREAKS (Sheet2): Level, No. of Streak Days
-  function parseAttendance(csvText) {
+  // ATTENDANCE & HOMEWORK STREAKS
+  // canvas_user_id, user_login_id, dcid, student_number, curriculum, phase,
+  // grade, Student Name, No.of streak days, Level, Status, Position
+  function parseStreaks(csvText, kind /* 'attendance' | 'homework' */) {
     const rows = parseCSV(csvText).filter(r => r.length && r.some(c => (c || '').trim() !== ''));
     if (!rows.length) return [];
-    const headers = rows[0].map(h => (h || '').trim().toLowerCase());
-    const idx = name => headers.indexOf(name.toLowerCase());
+    const headersRaw = rows[0].map(h => (h || '').trim());
 
-    const idI     = idx('user_login_id');
-    const canvasI = idx('canvas_user_id');
-    const nameI   = idx('student name');
-    const levelI  = idx('level');
-    const daysI   = idx('no. of streak days');
-    const zoneI   = idx('promotion/demotion zone');
-
+    const idI     = idxAny(headersRaw, ['user_login_id']);
+    const nameI   = idxAny(headersRaw, ['Student Name']);
+    const daysI   = idxAny(headersRaw, ['No.of streak days','No. of Streak Days','No of Streak Days']);
+    const levelI  = idxAny(headersRaw, ['Level']);
+    const statusI = idxAny(headersRaw, ['Status']);
+    const posI    = idxAny(headersRaw, ['Position']);
 
     const out = rows.slice(1).map((r,i) => {
       const userId = String(r[idI] || '').trim().toLowerCase();
       if (!userId) return null;
-      const canvas = String(r[canvasI] || '').trim();
       const name   = String(r[nameI] || '').trim();
-      return {
+
+      const level  = levelI !== -1 ? numLoose(r[levelI]) : 0;
+      const days   =  daysI !== -1 ? numLoose(r[daysI])  : 0;
+      const pos    =   posI !== -1 ? numLoose(r[posI])   : undefined;
+      const status = String((statusI !== -1 ? r[statusI] : '') || '').trim();
+
+      const row = {
         i,
         userId,
         email: userId,
-        canvasId: canvas,
         name,
-        attendanceLevel: numLoose(r[levelI]),
-        attendanceDay:   numLoose(r[daysI]),
         score: 0,
         change: 0,
-        status: String(r[zoneI] || '').trim()
-
+        status,
+        position: pos
       };
-    }).filter(Boolean);
 
-    return out;
-  }
-
-  // HOMEWORK STREAKS (Sheet3): Level, No. of Streak Days
-  function parseHomework(csvText) {
-    const rows = parseCSV(csvText).filter(r => r.length && r.some(c => (c || '').trim() !== ''));
-    if (!rows.length) return [];
-    const headers = rows[0].map(h => (h || '').trim().toLowerCase());
-    const idx = name => headers.indexOf(name.toLowerCase());
-
-    const idI     = idx('user_login_id');
-    const canvasI = idx('canvas_user_id');
-    const nameI   = idx('student name');
-    const levelI  = idx('level');
-    const daysI   = idx('no. of streak days');
-    const zoneI   = idx('promotion/demotion zone');
-
-
-    const out = rows.slice(1).map((r,i) => {
-      const userId = String(r[idI] || '').trim().toLowerCase();
-      if (!userId) return null;
-      const canvas = String(r[canvasI] || '').trim();
-      const name   = String(r[nameI] || '').trim();
-      return {
-        i,
-        userId,
-        email: userId,
-        canvasId: canvas,
-        name,
-        homeworkLevel: numLoose(r[levelI]),
-        homeworkDay:   numLoose(r[daysI]),
-        score: 0,
-        change: 0,
-        status: String(r[zoneI] || '').trim()
-
-      };
+      if (kind === 'attendance') {
+        row.attendanceLevel = level;
+        row.attendanceDay   = days;
+      } else {
+        row.homeworkLevel   = level;
+        row.homeworkDay     = days;
+      }
+      return row;
     }).filter(Boolean);
 
     return out;
@@ -333,14 +324,15 @@
     ]);
 
     datasets.points.rows     = parsePoints(csvPoints);
-    datasets.attendance.rows = parseAttendance(csvAttend);
-    datasets.homework.rows   = parseHomework(csvHome);
+    datasets.attendance.rows = parseStreaks(csvAttend, 'attendance');
+    datasets.homework.rows   = parseStreaks(csvHome,   'homework');
 
-    // Sort each dataset appropriately, set positions/pages/maps
+    // Sort & index
     for (const key of Object.keys(datasets)) {
       const ds = datasets[key];
 
       if (key === 'points') {
+        // Highest total points first; if equal, keep CSV order
         ds.rows.sort((a,b) => ((b.score ?? 0) - (a.score ?? 0)) || (a.i - b.i));
       } else if (key === 'attendance') {
         ds.rows.sort((a,b) =>
@@ -359,7 +351,6 @@
       for (let i = 0; i < ds.rows.length; i++) ds.rows[i].position = i + 1;
       ds.pages = computeTotalPages(ds.rows.length);
       ds.map   = new Map(ds.rows.map((row, i) => [row.userId, i]));
-      ds.mapCanvas = new Map(ds.rows.map((row, i) => [String(row.canvasId || "").toLowerCase(), i])); // kept for avatar convenience
     }
   }
 
@@ -460,7 +451,6 @@
     return mode;
   }
 
-  // Toggle Student.PointsvsStreaks across any visible Student instance(s)
   function setStudentPointsVsStreaks(isPointsMode) {
     const tries = [];
     tries.push(studentVM);
@@ -478,8 +468,9 @@
   function setMode(which, { resetPage }) {
     active = which;
 
-    // Points → true, Streaks → false
-    setStudentPointsVsStreaks(active === 'points');
+    // Points → false, Streaks (attendance/homework) → true
+setStudentPointsVsStreaks(active !== 'points');
+
 
     const ds = datasets[active];
     if (!ds) { console.warn('[MODE] unknown dataset', which); return; }
@@ -489,7 +480,6 @@
 
     renderHero(ds.rows);
 
-    // Always target the logged-in/simulated user for the Student panel
     const preferUserId = getPreferredUserId();
     let rowForPanels = pickRowByUserStrict(ds, preferUserId);
     if (!rowForPanels) rowForPanels = synthesizeUserRow(preferUserId);
@@ -522,6 +512,11 @@
 
     const preferUserId = getPreferredUserId();
 
+    // Set Overview enum from Points sheet "Status"
+const ps1 = overviewVM.enum?.('PointsStatusEnum1') ?? overviewVM.getEnum?.('PointsStatusEnum1');
+if (ps1) { try { ps1.value = getPointsStatusForUser(preferUserId) ?? null; } catch {} }
+console.log('[Overview Enum]', preferUserId, '→', getPointsStatusForUser(preferUserId));
+
     let p = pickRowByUserStrict(datasets.points,     preferUserId);
     let a = pickRowByUserStrict(datasets.attendance, preferUserId);
     let h = pickRowByUserStrict(datasets.homework,   preferUserId);
@@ -531,21 +526,25 @@
     if (!h) h = synthesizeUserRow(preferUserId);
 
     const v = {
-      StudentName:          overviewVM.string?.('StudentName')       ?? overviewVM.getString?.('StudentName'),
-      AttendanceLevel:      overviewVM.number?.('AttendanceLevel')   ?? overviewVM.getNumber?.('AttendanceLevel'),
-      AttendanceStreak:     overviewVM.number?.('AttendanceStreak')  ?? overviewVM.getNumber?.('AttendanceStreak'),
-      LessonAttendance:     overviewVM.number?.('LessonAttendance')  ?? overviewVM.getNumber?.('LessonAttendance'),
-      ModuleCompletion:     overviewVM.number?.('ModuleCompletion')  ?? overviewVM.getNumber?.('ModuleCompletion'),
-      Homework:             overviewVM.number?.('Homework')          ?? overviewVM.getNumber?.('Homework'),
+      StudentName:          overviewVM.string?.('StudentName')         ?? overviewVM.getString?.('StudentName'),
+      StudentFirstName:     overviewVM.string?.('StudentFirstName')    ?? overviewVM.getString?.('StudentFirstName'),
+      AttendanceLevel:      overviewVM.number?.('AttendanceLevel')     ?? overviewVM.getNumber?.('AttendanceLevel'),
+      AttendanceStreak:     overviewVM.number?.('AttendanceStreak')    ?? overviewVM.getNumber?.('AttendanceStreak'),
+      LessonAttendance:     overviewVM.number?.('LessonAttendance')    ?? overviewVM.getNumber?.('LessonAttendance'),
+      ModuleCompletion:     overviewVM.number?.('ModuleCompletion')    ?? overviewVM.getNumber?.('ModuleCompletion'),
+      Homework:             overviewVM.number?.('Homework')            ?? overviewVM.getNumber?.('Homework'),
       AssessmentSubmission: overviewVM.number?.('AssessmentSubmission') ?? overviewVM.getNumber?.('AssessmentSubmission'),
-      TotalPoints:          overviewVM.number?.('TotalPoints')       ?? overviewVM.getNumber?.('TotalPoints'),
-      HomeworkLevel:        overviewVM.number?.('HomeworkLevel')     ?? overviewVM.getNumber?.('HomeworkLevel'),
-      HomeworkStreak:       overviewVM.number?.('HomeworkStreak')    ?? overviewVM.getNumber?.('HomeworkStreak'),
+      TotalPoints:          overviewVM.number?.('TotalPoints')         ?? overviewVM.getNumber?.('TotalPoints'),
+      HomeworkLevel:        overviewVM.number?.('HomeworkLevel')       ?? overviewVM.getNumber?.('HomeworkLevel'),
+      HomeworkStreak:       overviewVM.number?.('HomeworkStreak')      ?? overviewVM.getNumber?.('HomeworkStreak'),
     };
 
     const name = p?.name || a?.name || h?.name || '';
+    const first = (name || '').trim().split(/\s+/)[0] || '';
+    if (v.StudentFirstName) v.StudentFirstName.value = first;
+
     if (v.StudentName)          v.StudentName.value          = name;
-    if (v.TotalPoints)          v.TotalPoints.value          = p?.score ?? 0;
+    if (v.TotalPoints)          v.TotalPoints.value          = p?.score ?? 0; // Current Total Points
     if (v.LessonAttendance)     v.LessonAttendance.value     = p?.lessonAttendance ?? 0;
     if (v.ModuleCompletion)     v.ModuleCompletion.value     = p?.moduleCompletion ?? 0;
     if (v.Homework)             v.Homework.value             = p?.homework ?? 0;
@@ -600,6 +599,8 @@
   }
 
   function writeEntry(entryVM, row, fallbackPosition) {
+
+    const ps3 = entryVM.enum?.('PointsStatusEnum3') ?? entryVM.getEnum?.('PointsStatusEnum3');
     const posProp     = entryVM.number?.('Position')             ?? entryVM.getNumber?.('Position');
     const nameProp    = entryVM.string?.('Name')                  ?? entryVM.getString?.('Name');
     const scoreProp   = entryVM.number?.('Score')                 ?? entryVM.getNumber?.('Score');
@@ -609,49 +610,57 @@
     const mcProp      = entryVM.number?.('ModuleCompletion')      ?? entryVM.getNumber?.('ModuleCompletion');
     const laProp      = entryVM.number?.('LessonAttendance')      ?? entryVM.getNumber?.('LessonAttendance');
     const statusProp  = entryVM.string?.('Status')                ?? entryVM.getString?.('Status');
-
+    const statusEnum  = entryVM.enum?.('StatusEnum')              ?? entryVM.getEnum?.('StatusEnum');
 
     if (row) {
       if (posProp)  posProp.value  = row.position ?? fallbackPosition ?? 0;
       if (nameProp) nameProp.value = row.name ?? '';
+      if (ps3) {
+  const val = getPointsStatusForUser(row?.userId); // always from Points sheet
+  try { ps3.value = val ?? null; } catch {}
+  console.log('[Entry Enum]', row?.name, '→', getPointsStatusForUser(row?.userId));
+
+}
+
 
       if (active === 'points') {
         if (laProp) laProp.value = row.lessonAttendance ?? 0;
         if (mcProp) mcProp.value = row.moduleCompletion ?? 0;
         if (hwProp) hwProp.value = row.homework ?? 0;
         if (asProp) asProp.value = row.assessmentSubmission ?? 0;
-        if (scoreProp)  scoreProp.value  = row.score ?? 0;          // total points (computed)
+        if (scoreProp)  scoreProp.value  = row.score ?? 0;          // from Current Total Points
         if (changeProp) changeProp.value = row.change ?? 0;
       } else if (active === 'attendance') {
         if (laProp) laProp.value = row.attendanceLevel ?? 0;
         if (mcProp) mcProp.value = row.attendanceDay   ?? 0;
         if (hwProp) hwProp.value = 0;
         if (asProp) asProp.value = 0;
-        if (scoreProp)  scoreProp.value  = row.attendanceDay ?? 0;  // show streak DAYS in Score
+        if (scoreProp)  scoreProp.value  = row.attendanceDay ?? 0;  // days shown as Score
         if (changeProp) changeProp.value = 0;
       } else if (active === 'homework') {
         if (hwProp) hwProp.value = row.homeworkLevel ?? 0;
         if (asProp) asProp.value = row.homeworkDay   ?? 0;
         if (laProp) laProp.value = 0;
         if (mcProp) mcProp.value = 0;
-        if (scoreProp)  scoreProp.value  = row.homeworkDay ?? 0;    // show streak DAYS in Score
+        if (scoreProp)  scoreProp.value  = row.homeworkDay ?? 0;    // days shown as Score
         if (changeProp) changeProp.value = 0;
       }
 
-      // Avatar (from canvas_user_id last 3 digits)
-      const skinPropE = entryVM.number?.('Skin')      ?? entryVM.getNumber?.('Skin');
-      const bodyPropE = entryVM.number?.('BodyShape') ?? entryVM.getNumber?.('BodyShape');
-      const hairPropE = entryVM.number?.('Hair')      ?? entryVM.getNumber?.('Hair');
-      if (skinPropE || bodyPropE || hairPropE) {
-        const [dA, dB, dC] = avatarDigitsFromCanvas(row.canvasId, row.userId);
-        if (skinPropE) skinPropE.value = dA;
-        if (bodyPropE) bodyPropE.value = dB;
-        if (hairPropE) hairPropE.value = dC;
-
-      }
+      // Always write the status text; set enum only for streak modes
       if (statusProp) statusProp.value = row.status || '';
+      if (statusEnum && active !== 'points') {
+        const v = (row.status || '').trim();
+        if (v === 'On Track' || v === 'Streak Warning' || v === 'Level Reset') {
+          try { statusEnum.value = v; } catch {}
+        }
+      } else if (statusEnum && active === 'points') {
+  // NEW: when Points mode is active, set all StatusEnums to "Points"
+  try { statusEnum.value = 'Points'; } catch {}
+}
+
 
     } else {
+      if (ps3) { try { ps3.value = null; } catch {} }
       if (posProp)    posProp.value    = fallbackPosition || 0;
       if (nameProp)   nameProp.value   = '';
       if (scoreProp)  scoreProp.value  = 0;
@@ -661,7 +670,6 @@
       if (hwProp)     hwProp.value     = 0;
       if (asProp)     asProp.value     = 0;
       if (statusProp) statusProp.value = '';
-
     }
   }
 
@@ -676,26 +684,36 @@
     for (const inst of uniq) writeStudent(inst, row);
   }
 
-  // Student panel: Points → score/change; Streaks → level/day into score/change
+  // Student panel mirrors per-mode values (and status)
   function writeStudent(svm, row) {
+    const ps2 = svm?.enum?.('PointsStatusEnum2') ?? svm?.getEnum?.('PointsStatusEnum2');
     const sName  = svm?.string?.('StudentName')     ?? svm?.getString?.('StudentName');
     const sPos   = svm?.number?.('StudentPosition') ?? svm?.getNumber?.('StudentPosition');
     const sScore = svm?.number?.('StudentScore')    ?? svm?.getNumber?.('StudentScore');
     const sChg   = svm?.number?.('StudentChange')   ?? svm?.getNumber?.('StudentChange');
 
+    const sStatus = svm?.string?.('Status') ?? svm?.getString?.('Status');
+    const sStatusEnum = svm?.enum?.('StatusEnum') ?? svm?.getEnum?.('StatusEnum');
+
     if (!row) {
+      if (ps2) { try { ps2.value = null; } catch {} }
       if (sName)  sName.value  = '';
       if (sPos)   sPos.value   = 0;
       if (sScore) sScore.value = 0;
       if (sChg)   sChg.value   = 0;
+      if (sStatus) sStatus.value = '';
       return;
     }
 
     if (sName) sName.value = row.name ?? '';
     if (sPos)  sPos.value  = row.position ?? 0;
+    if (ps2) { try { ps2.value = getPointsStatusForUser(row?.userId) ?? null; } catch {} }
+    console.log('[Student Enum]', row?.name, '→', getPointsStatusForUser(row?.userId));
+
+
 
     if (active === 'points') {
-      if (sScore) sScore.value = row.score ?? 0;
+      if (sScore) sScore.value = row.score ?? 0;      // Current Total Points
       if (sChg)   sChg.value   = row.change ?? 0;
     } else if (active === 'attendance') {
       if (sScore) sScore.value = row.attendanceLevel ?? 0;
@@ -705,19 +723,21 @@
       if (sChg)   sChg.value   = row.homeworkDay   ?? 0;
     }
 
+    // mirror status into Student panel; enum only in streak modes
+    const sv = (row.status || '').trim();
+    if (sStatus) sStatus.value = sv;
+    if (sStatusEnum && active !== 'points') {
+      if (sv === 'On Track' || sv === 'Streak Warning' || sv === 'Level Reset') {
+        try { sStatusEnum.value = sv; } catch {}
+      }
+    } else if (sStatusEnum && active === 'points') {
+      // Optional: clear enum in points mode.
+      try { sStatusEnum.value = null; } catch {}
+    }
+
     // Prefer Okta name if this is the logged-in viewer
     if (row.email && row.email === OKTA_STUDENT_EMAIL && OKTA_FULL_NAME && sName) {
       sName.value = OKTA_FULL_NAME;
-    }
-
-    const sSkinDir = svm?.number?.('Skin')      ?? svm?.getNumber?.('Skin');
-    const sBodyDir = svm?.number?.('BodyShape') ?? svm?.getNumber?.('BodyShape');
-    const sHairDir = svm?.number?.('Hair')      ?? svm?.getNumber?.('Hair');
-    if (sSkinDir || sBodyDir || sHairDir) {
-      const [dA, dB, dC] = avatarDigitsFromCanvas(row.canvasId, row.userId);
-      if (sSkinDir) sSkinDir.value = dA;
-      if (sBodyDir) sBodyDir.value = dB;
-      if (sHairDir) sHairDir.value = dC;
     }
   }
 
