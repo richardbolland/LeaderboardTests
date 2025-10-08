@@ -206,7 +206,7 @@ function getPointsStatusForUser(userId) {
 
     const curPosI    = idxAny(headersRaw, ['Current Position']);
     const lastPosI   = idxAny(headersRaw, ['Last Week Position']);
-    const changeI    = idxAny(headersRaw, ['Change (from last week to this week)']);
+    const changeI = idxAny(headersRaw, ['Change (from last week to this week)','Change']);
 
     const lessonI    = idxAny(headersRaw, ['Lesson Attendance']);
     const assessI    = idxAny(headersRaw, ['Assessment Submission']);
@@ -469,7 +469,7 @@ function getPointsStatusForUser(userId) {
     active = which;
 
     // Points → false, Streaks (attendance/homework) → true
-setStudentPointsVsStreaks(active !== 'points');
+setStudentPointsVsStreaks(active == 'points');
 
 
     const ds = datasets[active];
@@ -524,6 +524,32 @@ console.log('[Overview Enum]', preferUserId, '→', getPointsStatusForUser(prefe
     if (!p) p = synthesizeUserRow(preferUserId);
     if (!a) a = synthesizeUserRow(preferUserId);
     if (!h) h = synthesizeUserRow(preferUserId);
+
+
+    // Set Overview.Level enum from Points "Change" (Up/Neutral/Reset; else Default)
+const levelEnum = overviewVM.enum?.('Level') ?? overviewVM.getEnum?.('Level');
+if (levelEnum) {
+  let lvl = 'Default';
+  // only use the real Points row if it exists
+  const hasRealPoints = datasets.points?.map?.has(preferUserId);
+  if (hasRealPoints) {
+    const ch = Number(p?.change ?? 0);
+    if (ch > 0) lvl = 'Up';
+    else if (ch < 0) lvl = 'Reset';
+    else lvl = 'Neutral';
+  }
+  try { levelEnum.value = lvl; } catch {}
+}
+
+// Overview.ChangeAmount ← Points "Change" (number)
+const changeAmt = overviewVM.number?.('ChangeAmount') ?? overviewVM.getNumber?.('ChangeAmount');
+if (changeAmt) {
+  const hasRealPoints = datasets.points?.map?.has(preferUserId); // avoid synthesized default
+  const val = hasRealPoints ? Number(p?.change ?? 0) : 0;
+  changeAmt.value = isFinite(val) ? val : 0;
+}
+
+
 
     const v = {
       StudentName:          overviewVM.string?.('StudentName')         ?? overviewVM.getString?.('StudentName'),
