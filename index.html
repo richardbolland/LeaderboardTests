@@ -2,785 +2,1197 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Rive • Leaderboard</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Teneo Leaderboards</title>
   <style>
-    html, body { height: 100%; }
-    body { font-family: sans-serif; margin: 0; padding: 0; background: #FFF; }
+    html, body { height: 100%; margin: 0; padding: 0; background: #FFF; font-family: sans-serif; }
     #rive-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; background: #FFF; }
   </style>
 </head>
 <body>
   <canvas id="rive-canvas"></canvas>
-
+  
   <script src="https://unpkg.com/@rive-app/webgl2@2" crossorigin="anonymous"></script>
+
   <script>
-  /* ======================================================================= */
-  /*  1) CONFIG / OKTA + FALLBACK (user_login_id)                            */
-  /* ======================================================================= */
+    /* =======================================================================
+       1.0 CONFIGURATION & ENDPOINTS
+       ======================================================================= */
+    
+    // Endpoint for Banking Transactions (Writing data back to server)
+    const BANKING_ENDPOINT = "https://script.google.com/macros/s/AKfycbwg-XbqjbdwEHTX087TWFyNHB-NxYDdNyu4kZpBVZQMK-kzVF_UzUQDkuL3q-nGn53mtw/exec";
 
-  const PUBLISHED_CSV_WHOLE_DOC =
-    "https://docs.google.com/spreadsheets/d/e/2PACX-1vTPvCfe-DO63KzdF7tixoFLCFY13ufNSsMEr89LF11rcATicR_tK7PZK-r7HAV4D4_iajXRQG_vBu23/pub?output=csv";
+    // Data Source Configuration (Currently CSV-based)
+    // TODO: The backend developer should replace these with the Secure API Endpoints.
+    const PUB_HTML_URL = "/test_data.csv"; 
+    const BASE_CSV_URL = "/test_data.csv?";
+    const HOUSE_LOCAL_URL = "/house_data.csv?";
+    const ATTENDANCE_LOCAL_URL = "/attendance_data.csv?"; 
+    const HOMEWORK_LOCAL_URL = "/homework_data.csv?";
+    
+    // User Identity Fallback (For local testing/simulation)
+    const SIMULATED_USER_LOGIN_ID = "jayde.alderton@teneo.school";
 
-  const PUB_HTML_URL = PUBLISHED_CSV_WHOLE_DOC.replace(/\/pub\?output=csv.*/i, "/pubhtml");
-  const BASE_CSV_URL = PUBLISHED_CSV_WHOLE_DOC.replace(/\/pub\?output=csv.*/i, "/pub?single=true&output=csv");
+    // Layout Constants (Matches Rive Artboard Structure)
+    const HERO_SLOTS = 3;       // Top 3 Podium positions (Instances _1 to _3)
+    const TABLE_SLOTS = 7;      // Scrollable list positions (Instances _4 to _10)
+    const TABLE_START_SLOT = HERO_SLOTS + 1;
 
-  const OKTA_STUDENT_NAME    = window.firstName  || "";
-  const OKTA_STUDENT_SURNAME = window.lastName   || "";
-  const OKTA_STUDENT_EMAIL   = (window.email || "").toLowerCase();
-  const OKTA_FULL_NAME       = `${OKTA_STUDENT_NAME} ${OKTA_STUDENT_SURNAME}`.trim();
 
-  const SIMULATED_USER_LOGIN_ID = "teneotest@teneoeducation.com"; // for local testing
+    /* =======================================================================
+       2.0 GLOBAL STATE & INITIALIZATION
+       ======================================================================= */
+    
+    const layout = new rive.Layout({ fit: rive.Fit.Layout, layoutScaleFactor: 1 });
+    const canvas = document.getElementById('rive-canvas');
+    
+    // Rive Instances
+    let r = null;           // Main Rive Application Instance
+    let vm1 = null;         // Root View Model ('ViewModel1')
+    let studentVM = null;   // Reference to the Student Panel VM
+    let overviewVM = null;  // Reference to the Overview Panel VM
 
-  const HERO_SLOTS = 3;
-  const TABLE_SLOTS = 7;
-  const TABLE_START_SLOT = HERO_SLOTS + 1;
+    // Internal Data Store
+    // NOTE: Regardless of source (CSV or JSON), data must be mapped into this structure.
+    const datasets = {
+      points: { rows: [], pages: 1, map: new Map() },
+      attendance: { rows: [], pages: 1, map: new Map() },
+      homework: { rows: [], pages: 1, map: new Map() },
+      houses: { rows: [], map: new Map() },
+    };
 
-  const layout = new rive.Layout({ fit: rive.Fit.Layout, layoutScaleFactor: 1 });
+    let active = 'points'; // Current View Mode (points | attendance | homework | houses)
+    let pageIndex = 0;     // Current Pagination Index
 
-  const canvas = document.getElementById('rive-canvas');
-  let r = null, vm1 = null, studentVM = null, overviewVM = null;
 
-  const datasets = {
-    points:     { rows: [], pages: 1, map: new Map() },
-    attendance: { rows: [], pages: 1, map: new Map() },
-    homework:   { rows: [], pages: 1, map: new Map() },
-  };
-  let active = 'points';
-  let pageIndex = 0;
+    /* =======================================================================
+       3.0 IDENTITY MANAGEMENT
+       ======================================================================= */
 
-  /* ======================================================================= */
-  /*  2) UTILS                                                               */
-  /* ======================================================================= */
+    // Wraps the authentication provider's identity object.
+    function getOktaIdentity() {
+      return {
+        firstName: window.firstName || "",
+        lastName: window.lastName || "",
+        email: (window.email || "").toLowerCase(),
+        fullName: `${window.firstName || ""} ${window.lastName || ""}`.trim(),
+      };
+    }
 
-  function resize() { try { r?.resizeDrawingSurfaceToCanvas(); } catch {} }
-  addEventListener('resize', resize);
+    // Returns the canonical User ID for data lookups.
+    function getPreferredUserId() {
+      const { email } = getOktaIdentity();
+      return (email || SIMULATED_USER_LOGIN_ID || "").toLowerCase();
+    }
 
-  function parseCSV(text) {
-    const rows = [];
-    let row = [], field = "", inQuotes = false;
-    for (let i = 0; i < text.length; i++) {
-      const c = text[i];
-      if (inQuotes) {
-        if (c === '"') {
-          if (text[i + 1] === '"') { field += '"'; i++; } else { inQuotes = false; }
-        } else field += c;
-      } else {
-        if (c === '"') inQuotes = true;
-        else if (c === ',') { row.push(field); field = ""; }
-        else if (c === '\n') { row.push(field); rows.push(row); row = []; field = ""; }
-        else if (c === '\r') { /* ignore */ }
-        else field += c;
+    async function waitForIdentity(timeoutMs = 3000) {
+      const start = Date.now();
+      while (!window.email && Date.now() - start < timeoutMs) {
+        await new Promise(r => setTimeout(r, 50));
       }
     }
-    row.push(field); rows.push(row);
-    return rows;
-  }
 
-  // normalize header matching (handle dots, spaces, case)
-  function idxAny(headers, patterns) {
-    const norm = s => String(s || '')
-      .toLowerCase()
-      .replace(/\./g, '')        // "No.of" -> "Noof"
-      .replace(/\s+/g, ' ')
-      .trim();
-    const H = headers.map(h => norm(h));
-    for (const p of patterns) {
-      const target = norm(p);
-      const i = H.indexOf(target);
-      if (i !== -1) return i;
+
+    /* =======================================================================
+       4.0 HELPER UTILITIES
+       ======================================================================= */
+
+    // Resize logic for the Rive canvas
+    function resize() { try { r?.resizeDrawingSurfaceToCanvas(); } catch { } }
+    addEventListener('resize', resize);
+
+    // Standard CSV Parser
+    // NOTE: If switching to JSON API, this function can be deprecated.
+    function parseCSV(text) {
+      const rows = [];
+      let row = [], field = "", inQuotes = false;
+      for (let i = 0; i < text.length; i++) {
+        const c = text[i];
+        if (inQuotes) {
+          if (c === '"') {
+            if (text[i + 1] === '"') { field += '"'; i++; } else { inQuotes = false; }
+          } else field += c;
+        } else {
+          if (c === '"') inQuotes = true;
+          else if (c === ',') { row.push(field); field = ""; }
+          else if (c === '\n') { row.push(field); rows.push(row); row = []; field = ""; }
+          else if (c === '\r') { /* ignore */ }
+          else field += c;
+        }
+      }
+      row.push(field); rows.push(row);
+      return rows;
     }
-    return -1;
-  }
 
-  function num(v) {
-    if (v == null) return 0;
-    const n = Number(String(v).replace(/[, ]+/g, ''));
-    return isNaN(n) ? 0 : n;
-  }
-
-  function numLoose(v) {
-    const m = String(v ?? '').match(/-?\d+(\.\d+)?/);
-    return m ? Number(m[0]) : 0;
-  }
-
-  // === Points status helpers (Explorer | Hero | Icon | Legend)
-function normalizePointsStatus(s) {
-  const v = String(s || '').trim().toLowerCase();
-  if (v.startsWith('explorer')) return 'Explorer';
-  if (v.startsWith('hero'))     return 'Hero';
-  if (v.startsWith('icon'))     return 'Icon';
-  if (v.startsWith('legend'))   return 'Legend';
-  return null;
-}
-
-function getPointsStatusForUser(userId) {
-  const id = String(userId || '').toLowerCase();
-  const i = datasets.points?.map?.get(id);
-  const row = (i != null) ? datasets.points.rows[i] : null;
-  return normalizePointsStatus(row?.status);
-}
-
-
-  function findGidForSheet(html, sheetName) {
-    const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const nameRe = esc(String(sheetName).trim());
-    let m = new RegExp(`href="[^"]*?gid=(\\d+)[^"]*"[^>]*>\\s*${nameRe}\\s*<`, 'i').exec(html);
-    if (m) return m[1];
-    m = new RegExp(`data-gid="(\\d+)"[^>]*>\\s*${nameRe}\\s*<`, 'i').exec(html);
-    if (m) return m[1];
-    const near = new RegExp(`${nameRe}[\\s\\S]{0,200}?gid=(\\d+)`, 'i').exec(html);
-    if (near) return near[1];
-    return null;
-  }
-
-  function computeTotalPages(totalRows) {
-    const remaining = Math.max(0, totalRows - HERO_SLOTS);
-    return Math.max(1, Math.ceil(remaining / TABLE_SLOTS));
-  }
-
-  async function fetchCsvOrThrow(url) {
-    const res = await fetch(url, { credentials: "omit" });
-    if (res.redirected && /accounts\.google\.com/i.test(res.url)) {
-      throw new Error(
-        "[Sheets] Redirected to Google login. Ensure the sheet is Published to the web (Entire document) and visible to anyone."
-      );
+    // Fuzzy matcher for CSV headers (handles case and whitespace differences)
+    function idxAny(headers, patterns) {
+      const norm = s => String(s || '').toLowerCase().replace(/\./g, '').replace(/\s+/g, ' ').trim();
+      const H = headers.map(h => norm(h));
+      for (const p of patterns) {
+        const target = norm(p);
+        const i = H.indexOf(target);
+        if (i !== -1) return i;
+      }
+      return -1;
     }
-    if (!res.ok) throw new Error(`[Sheets] HTTP ${res.status} while fetching ${url}`);
-    return res.text();
-  }
 
-  function getPreferredUserId() {
-    return (OKTA_STUDENT_EMAIL || SIMULATED_USER_LOGIN_ID || "").toLowerCase();
-  }
-
-  function pickRowByUserStrict(ds, userId) {
-    if (!ds || !userId) return null;
-    if (ds.map && ds.map.has(userId)) {
-      return ds.rows[ds.map.get(userId)];
+    // Safe Number Parsing (Strips commas for values like "1,200")
+    function num(v) {
+      if (v == null) return 0;
+      const n = Number(String(v).replace(/[, ]+/g, ''));
+      return isNaN(n) ? 0 : n;
     }
-    return null;
-  }
 
-  function synthesizeUserRow(userId) {
-    const fromPoints = pickRowByUserStrict(datasets.points, userId);
-    const name   = fromPoints?.name || (OKTA_FULL_NAME || "Student");
+    // Loose Number Parsing (Extracts first valid number from string)
+    function numLoose(v) {
+      const m = String(v ?? '').match(/-?\d+(\.\d+)?/);
+      return m ? Number(m[0]) : 0;
+    }
 
-    return {
-      i: -1,
-      position: 0,
-      userId: userId,
-      email: userId,
-      name,
-      lessonAttendance: 0,
-      moduleCompletion: 0,
-      assessmentSubmission: 0,
-      homework: 0,
-      score: 0,
-      change: 0,
-      attendanceLevel: 0,
-      attendanceDay: 0,
-      homeworkLevel: 0,
-      homeworkDay: 0,
-      status: ''
-    };
-  }
+    // Maps raw status strings to Rive State Machine triggers
+    function normalizePointsStatus(s) {
+      const v = String(s || '').trim().toLowerCase();
+      if (v.startsWith('explorer')) return 'Explorer';
+      if (v.startsWith('hero')) return 'Hero';
+      if (v.startsWith('icon')) return 'Icon';
+      if (v.startsWith('legend')) return 'Legend';
+      return null;
+    }
 
-  /* ======================================================================= */
-  /*  3) PARSERS (ALIGNED TO YOUR HEADERS)                                   */
-  /* ======================================================================= */
+    function getPointsStatusForUser(userId) {
+      const id = String(userId || '').toLowerCase();
+      const i = datasets.points?.map?.get(id);
+      const row = (i != null) ? datasets.points.rows[i] : null;
+      return normalizePointsStatus(row?.status);
+    }
 
-  // POINTS
-  // canvas_user_id, user_login_id, dcid, student_number, curriculum, phase, Email Address,
-  // grade, Student Name, Current Position, Last Week Position,
-  // Change (from last week to this week), Lesson Attendance, Assessment Submission,
-  // Module Completion, Current Total Points, Last Weeks Total Points, Points Change,
-  // Ranking %, Status, homework_completion, Rewards Percentage, Rewards Earned
-  function parsePoints(csvText) {
-    const rows = parseCSV(csvText).filter(r => r.length && r.some(c => (c || '').trim() !== ''));
-    if (!rows.length) return [];
-    const headersRaw = rows[0].map(h => (h || '').trim());
+    // Sheet GID extraction (Specific to Google Sheets publishing)
+    function findGidForSheet(html, sheetName) {
+      const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const nameRe = esc(String(sheetName).trim());
+      let m = new RegExp(`href="[^"]*?gid=(\\d+)[^"]*"[^>]*>\\s*${nameRe}\\s*<`, 'i').exec(html);
+      if (m) return m[1];
+      m = new RegExp(`data-gid="(\\d+)"[^>]*>\\s*${nameRe}\\s*<`, 'i').exec(html);
+      if (m) return m[1];
+      const near = new RegExp(`${nameRe}[\\s\\S]{0,200}?gid=(\\d+)`, 'i').exec(html);
+      if (near) return near[1];
+      return null;
+    }
 
-    const idI        = idxAny(headersRaw, ['user_login_id']);
-    const nameI      = idxAny(headersRaw, ['Student Name']);
+    // Pagination Calculator
+    function computeTotalPages(totalRows) {
+      const remaining = Math.max(0, totalRows - HERO_SLOTS);
+      return Math.max(1, Math.ceil(remaining / TABLE_SLOTS));
+    }
 
-    const curPosI    = idxAny(headersRaw, ['Current Position']);
-    const lastPosI   = idxAny(headersRaw, ['Last Week Position']);
-    const changeI = idxAny(headersRaw, ['Change (from last week to this week)','Change']);
+    // Fetch Wrapper (Handles Auth Headers if needed)
+    async function fetchCsvOrThrow(url) {
+      const res = await fetch(url, {
+        credentials: "include",
+        redirect: "manual",
+        headers: { "X-Requested-With": "fetch", "X-Okta-Email": getPreferredUserId()}
+      });
+      if (res.type === "opaqueredirect" || res.status === 0 || res.status === 302 || res.status === 401) {
+        throw new Error("[Sheets] Not authenticated (SAML). Reload the page to sign in.");
+      }
+      if (!res.ok) {
+        throw new Error(`[Sheets] HTTP ${res.status} while fetching ${url}`);
+      }
+      return res.text();
+    }
 
-    const lessonI    = idxAny(headersRaw, ['Lesson Attendance']);
-    const assessI    = idxAny(headersRaw, ['Assessment Submission']);
-    const moduleI    = idxAny(headersRaw, ['Module Completion']);
-    const curTotalI  = idxAny(headersRaw, ['Current Total Points']);
-    const lastTotalI = idxAny(headersRaw, ['Last Weeks Total Points']);
-    const ptsChangeI = idxAny(headersRaw, ['Points Change']);
-    const rankPctI   = idxAny(headersRaw, ['Ranking %']);
-    const statusI    = idxAny(headersRaw, ['Status']);
-    const hwCompI    = idxAny(headersRaw, ['homework_completion']);
+    // Retrieves a specific user's row from the dataset
+    function pickRowByUserStrict(ds, userId) {
+      if (!ds || !userId) return null;
+      if (ds.map && ds.map.has(userId)) {
+        return ds.rows[ds.map.get(userId)];
+      }
+      return null;
+    }
 
-    const out = rows.slice(1).map((r,i) => {
-      const userId = String(r[idI] || '').trim().toLowerCase();
-      if (!userId) return null;
-      const name   = String(r[nameI] || '').trim();
-
-      const lesson = lessonI    !== -1 ? numLoose(r[lessonI])    : 0;
-      const assess = assessI    !== -1 ? numLoose(r[assessI])    : 0;
-      const module = moduleI    !== -1 ? numLoose(r[moduleI])    : 0;
-      const hwcomp = hwCompI    !== -1 ? numLoose(r[hwCompI])    : 0;
-
-      // score from "Current Total Points"
-      const score  = curTotalI  !== -1 ? num(r[curTotalI])       : 0;
-
-      // change from "Change (from last week to this week)" if present
-      const change = changeI    !== -1 ? numLoose(r[changeI])    : 0;
-
-      const position = curPosI  !== -1 ? numLoose(r[curPosI])    : undefined;
+    // Generates a default/empty row for users not found in the dataset
+    function synthesizeUserRow(userId) {
+      const { fullName } = getOktaIdentity();
+      const fromPoints = pickRowByUserStrict(datasets.points, userId);
+      const name = fromPoints?.name || (fullName || "Student");
 
       return {
-        i,
-        userId,
+        i: -1,
+        position: 0,
+        userId: userId,
         email: userId,
         name,
-        firstName: name,
-        surname: '',
-        lessonAttendance:     lesson,
-        assessmentSubmission: assess,
-        moduleCompletion:     module,
-        homework:             hwcomp,
-        score,
-        change,
-        position,
-        status: String((statusI !== -1 ? r[statusI] : '') || '').trim()
-      };
-    }).filter(Boolean);
-
-    return out;
-  }
-
-  // ATTENDANCE & HOMEWORK STREAKS
-  // canvas_user_id, user_login_id, dcid, student_number, curriculum, phase,
-  // grade, Student Name, No.of streak days, Level, Status, Position
-  function parseStreaks(csvText, kind /* 'attendance' | 'homework' */) {
-    const rows = parseCSV(csvText).filter(r => r.length && r.some(c => (c || '').trim() !== ''));
-    if (!rows.length) return [];
-    const headersRaw = rows[0].map(h => (h || '').trim());
-
-    const idI     = idxAny(headersRaw, ['user_login_id']);
-    const nameI   = idxAny(headersRaw, ['Student Name']);
-    const daysI   = idxAny(headersRaw, ['No.of streak days','No. of Streak Days','No of Streak Days']);
-    const levelI  = idxAny(headersRaw, ['Level']);
-    const statusI = idxAny(headersRaw, ['Status']);
-    const posI    = idxAny(headersRaw, ['Position']);
-
-    const out = rows.slice(1).map((r,i) => {
-      const userId = String(r[idI] || '').trim().toLowerCase();
-      if (!userId) return null;
-      const name   = String(r[nameI] || '').trim();
-
-      const level  = levelI !== -1 ? numLoose(r[levelI]) : 0;
-      const days   =  daysI !== -1 ? numLoose(r[daysI])  : 0;
-      const pos    =   posI !== -1 ? numLoose(r[posI])   : undefined;
-      const status = String((statusI !== -1 ? r[statusI] : '') || '').trim();
-
-      const row = {
-        i,
-        userId,
-        email: userId,
-        name,
+        studentNumber: "",
+        curriculum: "",
+        grade: "",
+        house: "",
+        manualPoints: 0,
+        orientation: "",
+        pointsPending: 0,
+        pointsBanked: 0,
+        pointsLost: 0,
+        csvPosition: 0,
+        lessonAttendance: 0,
+        moduleCompletion: 0,
+        assessmentSubmission: 0,
+        homework: 0,
         score: 0,
         change: 0,
-        status,
-        position: pos
+        attendanceLevel: 0,
+        attendanceDay: 0,
+        homeworkLevel: 0,
+        homeworkDay: 0,
+        status: ''
+      };
+    }
+
+    // Date & Week Calculator for the Overview Panel
+    function getCurrentWeekInfo() {
+      const now = new Date();
+      // Calculate ISO Week Number
+      const d = new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()));
+      d.setUTCDate(d.getUTCDate() + 4 - (d.getUTCDay() || 7));
+      const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+      const weekNum = Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
+
+      // Calculate Range (Monday - Sunday)
+      const curr = new Date(); 
+      const currentDay = curr.getDay(); // 0=Sun, 1=Mon...
+      const distanceToMon = currentDay === 0 ? -6 : 1 - currentDay; 
+      
+      const monday = new Date(curr);
+      monday.setDate(curr.getDate() + distanceToMon);
+      
+      const sunday = new Date(monday);
+      sunday.setDate(monday.getDate() + 6);
+
+      const fmt = (dt) => {
+        const day = dt.getDate();
+        const month = dt.toLocaleString('en-GB', { month: 'long' });
+        const suffix = (day % 10 == 1 && day != 11) ? "st" : 
+                       (day % 10 == 2 && day != 12) ? "nd" : 
+                       (day % 10 == 3 && day != 13) ? "rd" : "th";
+        return `${day}${suffix} ${month}`;
       };
 
-      if (kind === 'attendance') {
-        row.attendanceLevel = level;
-        row.attendanceDay   = days;
-      } else {
-        row.homeworkLevel   = level;
-        row.homeworkDay     = days;
-      }
-      return row;
-    }).filter(Boolean);
-
-    return out;
-  }
-
-  /* ======================================================================= */
-  /*  4) DATA LOADING                                                         */
-  /* ======================================================================= */
-
-  async function preloadAllThree() {
-    const html = await fetch(PUB_HTML_URL, { credentials: "omit" }).then(r => r.text());
-
-    const gidPoints     = findGidForSheet(html, 'Points')             ?? 0;
-    const gidAttendance = findGidForSheet(html, 'Attendance Streaks') ?? 0;
-    const gidHomework   = findGidForSheet(html, 'Homework Streaks')   ?? 0;
-
-    const [csvPoints, csvAttend, csvHome] = await Promise.all([
-      fetchCsvOrThrow(`${BASE_CSV_URL}&gid=${gidPoints}`),
-      fetchCsvOrThrow(`${BASE_CSV_URL}&gid=${gidAttendance}`),
-      fetchCsvOrThrow(`${BASE_CSV_URL}&gid=${gidHomework}`)
-    ]);
-
-    datasets.points.rows     = parsePoints(csvPoints);
-    datasets.attendance.rows = parseStreaks(csvAttend, 'attendance');
-    datasets.homework.rows   = parseStreaks(csvHome,   'homework');
-
-    // Sort & index
-    for (const key of Object.keys(datasets)) {
-      const ds = datasets[key];
-
-      if (key === 'points') {
-        // Highest total points first; if equal, keep CSV order
-        ds.rows.sort((a,b) => ((b.score ?? 0) - (a.score ?? 0)) || (a.i - b.i));
-      } else if (key === 'attendance') {
-        ds.rows.sort((a,b) =>
-          ((b.attendanceLevel ?? 0) - (a.attendanceLevel ?? 0)) ||
-          ((b.attendanceDay   ?? 0) - (a.attendanceDay   ?? 0)) ||
-          (a.i - b.i)
-        );
-      } else if (key === 'homework') {
-        ds.rows.sort((a,b) =>
-          ((b.homeworkLevel ?? 0) - (a.homeworkLevel ?? 0)) ||
-          ((b.homeworkDay   ?? 0) - (a.homeworkDay   ?? 0)) ||
-          (a.i - b.i)
-        );
-      }
-
-      for (let i = 0; i < ds.rows.length; i++) ds.rows[i].position = i + 1;
-      ds.pages = computeTotalPages(ds.rows.length);
-      ds.map   = new Map(ds.rows.map((row, i) => [row.userId, i]));
+      return {
+        number: weekNum,
+        range: `${fmt(monday)} - ${fmt(sunday)}`
+      };
     }
-  }
 
-  /* ======================================================================= */
-  /*  5) RIVE BOOTSTRAP                                                       */
-  /* ======================================================================= */
 
-  r = new rive.Rive({
-    src: 'leaderboard.riv',
-    canvas,
-    artboard: 'Dashboard',
-    stateMachines: ['State Machine 1'],
-    autoplay: true,
-    layout,
-    autoBind: true,
-    onLoad: async () => {
-      resize();
+    /* =======================================================================
+       5.0 DATA MAPPING LAYER (Parsers)
+       ======================================================================= */
+    
+    // NOTE TO DEVELOPER: 
+    // These functions map the external data source (currently CSV) to the internal 
+    // Javascript object structure required by the Rive integration.
+    // If switching to a JSON API, ensure the returned objects match the schema defined below.
 
-      vm1 =
-        (typeof r.viewModelInstance === 'function' ? r.viewModelInstance('View Model 1') : null) ||
-        r.viewModelInstance ||
-        r.contents?.viewModel?.('View Model 1')?.instance?.();
+    // 5.1 Parse Student Points & General Stats
+    function parsePoints(csvText) {
+      const rows = parseCSV(csvText).filter(r => r.length && r.some(c => (c || '').trim() !== ''));
+      if (!rows.length) return [];
+      const headersRaw = rows[0].map(h => (h || '').trim());
 
-      overviewVM =
-        (typeof r.viewModelInstance === 'function' ? r.viewModelInstance('Overview') : null) ||
-        vm1?.viewModel?.('Overview') || vm1?.getViewModel?.('Overview') ||
-        r.contents?.viewModel?.('Overview')?.instance?.();
+      // Header Mapping
+      const idI = idxAny(headersRaw, ['user_login_id', 'Student_Number']); 
+      const nameI = idxAny(headersRaw, ['Student Name', 'Student_Name']);
+      const stdNumI = idxAny(headersRaw, ['student_number']);
+      const currI = idxAny(headersRaw, ['curriculum']);
+      const gradeI = idxAny(headersRaw, ['grade']);
+      const houseI = idxAny(headersRaw, ['House']);
+      const orientI = idxAny(headersRaw, ['Orientation_Completion']);
+      const curPosI = idxAny(headersRaw, ['Current Position']);
+      const changeI = idxAny(headersRaw, ['Change', 'Rank_Change']);
+      
+      const lessonI = idxAny(headersRaw, ['Lesson Attendance']);
+      const assessI = idxAny(headersRaw, ['Assessment Submission']);
+      const moduleI = idxAny(headersRaw, ['Module Completion']);
+      const hwCompI = idxAny(headersRaw, ['homework_completion']);
+      const manualI = idxAny(headersRaw, ['Manual_Points']);
+      
+      const pendingI = idxAny(headersRaw, ['PointsPending', 'Points_Pending']);
+      const bankedI = idxAny(headersRaw, ['PointsBanked', 'Points_Banked']);
+      const lostI = idxAny(headersRaw, ['PointsLost', 'Points_Lost']);
+      const statusI = idxAny(headersRaw, ['Status']);
 
-      studentVM = resolveStudentVM(r, vm1);
+      const out = rows.slice(1).map((r, i) => {
+        const userId = String(r[idI] || '').trim().toLowerCase();
+        if (!userId) return null;
+        const name = String(r[nameI] || '').trim();
 
-      if (!vm1) return;
+        // Numeric sanitization (Handling commas)
+        const lesson = lessonI !== -1 ? num(r[lessonI]) : 0;
+        const assess = assessI !== -1 ? num(r[assessI]) : 0;
+        const module = moduleI !== -1 ? num(r[moduleI]) : 0;
+        const hwcomp = hwCompI !== -1 ? num(r[hwCompI]) : 0;
+        const manual = manualI !== -1 ? num(r[manualI]) : 0;
+        const change = changeI !== -1 ? numLoose(r[changeI]) : 0; 
+        const rawCsvPos = curPosI !== -1 ? numLoose(r[curPosI]) : 0;
 
-      setLoaded(false);
+        // Score Calculation
+        const pPending = pendingI !== -1 ? num(r[pendingI]) : 0;
+        const pBanked = bankedI !== -1 ? num(r[bankedI]) : 0;
+        const pLost = lostI !== -1 ? num(r[lostI]) : 0;
+        const score = pPending + pBanked + pLost;
 
-      r.on?.(rive.EventType.RiveEvent, (evt) => {
-        const ev = evt?.data;
-        if (!ev || ev.type !== rive.RiveEventType.General) return;
-        if (ev.name === 'PageForward') { goPage(+1); return; }
-        if (ev.name === 'PageBack')    { goPage(-1); return; }
-      });
+        return {
+          i,
+          userId,
+          email: userId,
+          name,
+          firstName: name,
+          studentNumber: stdNumI !== -1 ? String(r[stdNumI] || '') : "",
+          curriculum: currI !== -1 ? String(r[currI] || '') : "",
+          grade: gradeI !== -1 ? String(r[gradeI] || '') : "",
+          house: houseI !== -1 ? String(r[houseI] || '') : "",
+          orientation: orientI !== -1 ? String(r[orientI] || '') : "",
+          
+          lessonAttendance: lesson,
+          assessmentSubmission: assess,
+          moduleCompletion: module,
+          homework: hwcomp,
+          manualPoints: manual,
+          
+          pointsPending: pPending,
+          pointsBanked: pBanked,
+          pointsLost: pLost,
+          score,
+          change,
+          csvPosition: rawCsvPos,
+          status: String((statusI !== -1 ? r[statusI] : '') || '').trim()
+        };
+      }).filter(Boolean);
 
-      try {
-        await preloadAllThree();
-      } catch (err) {
-        console.error(err?.message || err);
+      return out;
+    }
+
+    // 5.2 Parse Streak Data (Attendance & Homework)
+    function parseStreaks(csvText, kind) {
+      const rows = parseCSV(csvText).filter(r => r.length && r.some(c => (c || '').trim() !== ''));
+      if (!rows.length) return [];
+      const headersRaw = rows[0].map(h => (h || '').trim());
+
+      const idI = idxAny(headersRaw, ['user_login_id']);
+      const nameI = idxAny(headersRaw, ['Student Name']);
+      const currI = idxAny(headersRaw, ['curriculum']);
+      const gradeI = idxAny(headersRaw, ['grade']);
+      const daysI = idxAny(headersRaw, ['No.of streak days', 'No. of Streak Days', 'No of Streak Days']);
+      const levelI = idxAny(headersRaw, ['Level']);
+      const statusI = idxAny(headersRaw, ['Status']);
+      const posI = idxAny(headersRaw, ['Position']);
+
+      const out = rows.slice(1).map((r, i) => {
+        const userId = String(r[idI] || '').trim().toLowerCase();
+        if (!userId) return null;
+        const name = String(r[nameI] || '').trim();
+        const level = levelI !== -1 ? numLoose(r[levelI]) : 0;
+        const days = daysI !== -1 ? numLoose(r[daysI]) : 0;
+        const pos = posI !== -1 ? numLoose(r[posI]) : undefined;
+        const status = String((statusI !== -1 ? r[statusI] : '') || '').trim();
+
+        const row = {
+          i,
+          userId,
+          email: userId,
+          name,
+          curriculum: currI !== -1 ? String(r[currI] || '') : "",
+          grade: gradeI !== -1 ? String(r[gradeI] || '') : "",
+          score: 0,
+          change: 0,
+          status,
+          position: pos
+        };
+
+        if (kind === 'attendance') {
+          row.attendanceLevel = level;
+          row.attendanceDay = days;
+        } else {
+          row.homeworkLevel = level;
+          row.homeworkDay = days;
+        }
+        return row;
+      }).filter(Boolean);
+
+      return out;
+    }
+
+    // 5.3 Parse House Data
+    function parseHouses(csvText) {
+      const rows = parseCSV(csvText).filter(r => r.length && r.some(c => (c || '').trim() !== ''));
+      if (!rows.length) return [];
+      const headersRaw = rows[0].map(h => (h || '').trim());
+
+      // Identification Headers
+      const nameI = idxAny(headersRaw, ['HouseName']);
+      const pointsI = idxAny(headersRaw, ['HousePoints']);
+      const posI = idxAny(headersRaw, ['HousePosition']);
+
+      // Statistics Headers
+      const lessonI = idxAny(headersRaw, ['Lesson Attendance']);
+      const moduleI = idxAny(headersRaw, ['Module Completion']);
+      const hwI = idxAny(headersRaw, ['homework_completion']);
+      const assessI = idxAny(headersRaw, ['Assessment Submission']);
+      const manualI = idxAny(headersRaw, ['Manual_Points']);
+      const orientI = idxAny(headersRaw, ['Orientation_Completion']);
+
+      const out = rows.slice(1).map((r, i) => {
+        const name = nameI !== -1 ? String(r[nameI] || '').trim() : "";
+        if (!name) return null;
+
+        const rawPos = posI !== -1 ? String(r[posI] || '') : "";
+        const posNum = parseInt(rawPos) || (i + 1); 
+
+        return {
+          userId: name.toLowerCase(), 
+          name: name, 
+          
+          score: pointsI !== -1 ? num(r[pointsI]) : 0, 
+          position: posNum,
+          positionStr: rawPos,
+
+          // Mapped Statistics
+          lessonAttendance: lessonI !== -1 ? num(r[lessonI]) : 0,
+          moduleCompletion: moduleI !== -1 ? num(r[moduleI]) : 0,
+          homework: hwI !== -1 ? num(r[hwI]) : 0,
+          assessmentSubmission: assessI !== -1 ? num(r[assessI]) : 0,
+          manualPoints: manualI !== -1 ? num(r[manualI]) : 0,
+          orientation: orientI !== -1 ? String(r[orientI] || '') : "0%"
+        };
+      }).filter(Boolean);
+
+      // Enforce Sorting (1st to 4th)
+      out.sort((a, b) => a.position - b.position);
+
+      return out;
+    }
+
+
+    /* =======================================================================
+       6.0 DATA INGESTION LAYER
+       ======================================================================= */
+
+    async function preloadAllThree() {
+      
+      // --- TODO: DEVELOPER INTERVENTION REQUIRED ---
+      // This section currently fetches data from public CSVs.
+      // Replace the logic below with `fetch` calls to your Secure API Endpoints.
+      // ---------------------------------------------
+
+      // 1. Fetch Raw Data (Currently CSV)
+      const resHtml = await fetch(PUB_HTML_URL, { credentials: "include", redirect: "manual", headers: { "X-Requested-With": "fetch" } });
+      if (resHtml.type === "opaqueredirect" || resHtml.status === 0 || resHtml.status === 302 || resHtml.status === 401) {
+        throw new Error("[Auth] Not authenticated (SAML). Reload to sign in.");
+      }
+      const html = await resHtml.text();
+
+      // Extract Sheet GIDs (Specific to Google Sheets implementation)
+      const gidPoints = findGidForSheet(html, 'Points') ?? 0;
+      const gidAttendance = findGidForSheet(html, 'Attendance Streaks') ?? 0;
+      const gidHomework = findGidForSheet(html, 'Homework Streaks') ?? 0;
+      const gidHouse = findGidForSheet(html, 'House') ?? 0; 
+
+      const isLocal = BASE_CSV_URL.includes("test_data");
+      const pointsUrl = isLocal ? BASE_CSV_URL : `${BASE_CSV_URL}&gid=${gidPoints}`;
+      const attendUrl = isLocal ? ATTENDANCE_LOCAL_URL : `${BASE_CSV_URL}&gid=${gidAttendance}`;
+      const homeUrl   = isLocal ? HOMEWORK_LOCAL_URL   : `${BASE_CSV_URL}&gid=${gidHomework}`;
+      const houseUrl  = isLocal ? HOUSE_LOCAL_URL      : `${BASE_CSV_URL}&gid=${gidHouse}`;
+
+      const [csvPoints, csvAttend, csvHome, csvHouse] = await Promise.all([
+        fetchCsvOrThrow(pointsUrl),
+        fetchCsvOrThrow(attendUrl),
+        fetchCsvOrThrow(homeUrl),
+        fetchCsvOrThrow(houseUrl)
+      ]);
+
+      // 2. Parse Data
+      let rowsPoints = parsePoints(csvPoints);
+      let rowsAttend = parseStreaks(csvAttend, 'attendance');
+      let rowsHome   = parseStreaks(csvHome, 'homework');
+      let rowsHouse  = parseHouses(csvHouse);
+
+      datasets.houses.rows = rowsHouse;
+      datasets.houses.map = new Map(rowsHouse.map(r => [r.name.toLowerCase(), r]));
+
+      // 3. Apply Segmentation/Filtering (Grade & Curriculum)
+      const myId = getPreferredUserId();
+      const myRow = rowsPoints.find(r => r.userId === myId);
+
+      if (myRow) {
+          const myGrade = (myRow.grade || '').trim().toLowerCase();
+          const myCurr = (myRow.curriculum || '').trim().toLowerCase();
+          console.log(`[SEGMENTATION] Filtering for: ${myCurr} / ${myGrade}`);
+
+          const isMatch = (r) => {
+              const g = (r.grade || '').trim().toLowerCase();
+              const c = (r.curriculum || '').trim().toLowerCase();
+              return g === myGrade && c === myCurr;
+          };
+
+          rowsPoints = rowsPoints.filter(isMatch);
+          rowsAttend = rowsAttend.filter(isMatch);
+          rowsHome   = rowsHome.filter(isMatch);
+      }
+
+      datasets.points.rows = rowsPoints;
+      datasets.attendance.rows = rowsAttend;
+      datasets.homework.rows = rowsHome;
+
+      // 4. Sort & Rank Logic
+      for (const key of Object.keys(datasets)) {
+        if (key === 'houses') continue;
+        const ds = datasets[key];
+
+        if (key === 'points') {
+          ds.rows.sort((a, b) => ((b.score ?? 0) - (a.score ?? 0)) || (a.i - b.i));
+        } else if (key === 'attendance') {
+          ds.rows.sort((a, b) =>
+            ((b.attendanceLevel ?? 0) - (a.attendanceLevel ?? 0)) ||
+            ((b.attendanceDay ?? 0) - (a.attendanceDay ?? 0)) || (a.i - b.i)
+          );
+        } else if (key === 'homework') {
+          ds.rows.sort((a, b) =>
+            ((b.homeworkLevel ?? 0) - (a.homeworkLevel ?? 0)) ||
+            ((b.homeworkDay ?? 0) - (a.homeworkDay ?? 0)) || (a.i - b.i)
+          );
+        }
+
+        for (let i = 0; i < ds.rows.length; i++) {
+            if (i === 0) {
+                ds.rows[i].position = 1; 
+            } else {
+                const prev = ds.rows[i - 1];
+                const curr = ds.rows[i];
+                let isTied = false;
+
+                if (key === 'points') isTied = (curr.score === prev.score);
+                else if (key === 'attendance') isTied = (curr.attendanceLevel === prev.attendanceLevel) && (curr.attendanceDay === prev.attendanceDay);
+                else if (key === 'homework') isTied = (curr.homeworkLevel === prev.homeworkLevel) && (curr.homeworkDay === prev.homeworkDay);
+
+                ds.rows[i].position = isTied ? prev.position : i + 1;
+            }
+        }
+        
+        ds.pages = computeTotalPages(ds.rows.length);
+        ds.map = new Map(ds.rows.map((row, i) => [row.userId, i]));
+      }
+    }
+
+
+    /* =======================================================================
+       7.0 RIVE INITIALIZATION & EVENT LISTENERS
+       ======================================================================= */
+
+    r = new rive.Rive({
+      src: 'assets/leaderboard.riv', // Points to the compiled Rive file
+      canvas,
+      artboard: 'Dashboard',
+      stateMachines: ['State Machine 1'],
+      autoplay: true,
+      layout,
+      autoBind: true,
+      onLoad: async () => {
+        resize();
+
+        // 7.1 View Model Resolution
+        // We capture references to key View Models here for later updates.
+        vm1 = (typeof r.viewModelInstance === 'function' ? r.viewModelInstance('ViewModel1') : null) ||
+              r.viewModelInstance || r.contents?.viewModel?.('ViewModel1')?.instance?.();
+
+        overviewVM = (typeof r.viewModelInstance === 'function' ? r.viewModelInstance('Overview') : null) ||
+                     vm1?.viewModel?.('Overview') || vm1?.getViewModel?.('Overview') ||
+                     r.contents?.viewModel?.('Overview')?.instance?.();
+
+        studentVM = resolveStudentVM(r, vm1);
+
+        if (!vm1) return;
         setLoaded(false);
+
+        // 7.2 Event Listener (Pagination & Banking Logic)
+        r.on?.(rive.EventType.RiveEvent, (evt) => {
+          const ev = evt?.data;
+          if (!ev || ev.type !== rive.RiveEventType.General) return;
+
+          // Pagination
+          if (ev.name === 'PageForward') { goPage(+1); return; }
+          if (ev.name === 'PageBack') { goPage(-1); return; }
+
+          // Banking (Writing Points back to Server)
+          if (ev.name === 'Banked') {
+             console.log("💰 [ACTION] Banked button clicked!");
+
+             const pendingProp = overviewVM?.number?.('PointsPending') ?? overviewVM?.getNumber?.('PointsPending');
+             const moneyProp   = overviewVM?.number?.('MoneyValue')    ?? overviewVM?.getNumber?.('MoneyValue');
+             const bankedProp  = overviewVM?.number?.('BankedPoints')  ?? overviewVM?.getNumber?.('BankedPoints');
+
+             if (!bankedProp) console.warn("⚠️ Could not find Rive input 'BankedPoints'.");
+
+             const currentPending = pendingProp ? pendingProp.value : 0;
+             const currentBanked  = bankedProp  ? bankedProp.value  : 0;
+
+             // Logic: Add Pending to Banked, Calculate Money as 1% of NEW total
+             const newTotalPoints = currentBanked + currentPending;
+             const newTotalMoney = Number((newTotalPoints * 0.01).toFixed(2));
+
+             console.log(`🧮 Math: Pending (${currentPending}) + Banked (${currentBanked}) = New (${newTotalPoints}) | Money: ${newTotalMoney}`);
+
+             // Update Rive UI immediately
+             if (bankedProp)  bankedProp.value  = newTotalPoints;  
+             if (moneyProp)   moneyProp.value   = newTotalMoney;   
+             if (pendingProp) pendingProp.value = 0;               
+
+             // Sync with Backend
+             const userEmail = getPreferredUserId(); 
+             if (currentPending <= 0) return;
+             
+             const moneyEarnedThisTransaction = Number((currentPending * 0.01).toFixed(2));
+
+             fetch(BANKING_ENDPOINT, {
+                 method: "POST", mode: "no-cors", headers: { "Content-Type": "text/plain" },
+                 body: JSON.stringify({ email: userEmail, points: currentPending, moneyEarned: moneyEarnedThisTransaction })
+             })
+             .then(() => console.log("✅ Bank request sent!"))
+             .catch(err => console.error("❌ Banking failed:", err));
+             return; 
+          }
+        });
+
+        // 7.3 Data Loading
         try {
-          const errStr = vm1?.string?.('ErrorMessage') || vm1?.getString?.('ErrorMessage');
-          if (errStr) errStr.value = String(err?.message || 'Failed to load data.');
-        } catch {}
+          await preloadAllThree();
+        } catch (err) {
+          console.error(err?.message || err);
+          setLoaded(false);
+          try {
+            const errStr = vm1?.string?.('ErrorMessage') || vm1?.getString?.('ErrorMessage');
+            if (errStr) errStr.value = String(err?.message || 'Failed to load data.');
+          } catch { }
+          return;
+        }
+
+        // 7.4 Start Application
+        writeOverview();
+        const mode0 = readModeFromBooleans(false);
+        setMode(mode0, { resetPage: true });
+        setLoaded(true);
+        console.log("[READY] Leaderboard loaded");
+
+        // Polling loop to detect tab changes inside Rive
+        let lastMode = mode0;
+        setInterval(() => {
+          const m = readModeFromBooleans(false);
+          if (m !== lastMode) {
+            lastMode = m;
+            setMode(m, { resetPage: true });
+          }
+        }, 300);
+      }
+    });
+
+    // Helper to find the Student Panel VM in various runtime hierarchies
+    function resolveStudentVM(r, vm1) {
+      const candidates = [];
+      try { const v = vm1?.viewModel?.('Student') || vm1?.getViewModel?.('Student'); if (v) candidates.push(['vm1->Student', v]); } catch { }
+      try { const v = (typeof r.viewModelInstance === 'function' ? r.viewModelInstance('Student') : r.viewModelInstance); if (v) candidates.push(['r.viewModelInstance(Student)', v]); } catch { }
+      try { const v = r.contents?.viewModel?.('Student')?.instance?.(); if (v) candidates.push(['contents->Student.instance()', v]); } catch { }
+      try { const ui = vm1?.viewModel?.('UserInfo') || vm1?.getViewModel?.('UserInfo'); const v = ui?.viewModel?.('Student') || ui?.getViewModel?.('Student'); if (v) candidates.push(['vm1->UserInfo->Student', v]); } catch { }
+      const hit = candidates.find(([_, inst]) => !!inst) || null;
+      return hit ? hit[1] : null;
+    }
+
+
+    /* =======================================================================
+       8.0 VIEW MODEL LOGIC (DATA BINDING)
+       ======================================================================= */
+
+    // 8.1 Write Overview Panel Data
+    function writeOverview() {
+      if (!overviewVM) return;
+
+      const preferUserId = getPreferredUserId();
+      let p = pickRowByUserStrict(datasets.points, preferUserId);
+      let a = pickRowByUserStrict(datasets.attendance, preferUserId);
+      let h = pickRowByUserStrict(datasets.homework, preferUserId);
+
+      if (!p) p = synthesizeUserRow(preferUserId);
+      if (!a) a = { attendanceLevel: 0, attendanceDay: 0 }; 
+      if (!h) h = { homeworkLevel: 0, homeworkDay: 0 };
+
+      const userHouseName = (p.house || '').trim();
+      const userHouseData = datasets.houses.map.get(userHouseName.toLowerCase());
+      const leadingHouse = datasets.houses.rows.length > 0 ? datasets.houses.rows[0] : null;
+
+      // --- String Bindings ---
+      const setStr = (name, val) => {
+          const prop = overviewVM.string?.(name) ?? overviewVM.getString?.(name);
+          if (prop) prop.value = String(val || '');
+      };
+
+      setStr('Student_Number', p.studentNumber);
+      setStr('Curriculum', p.curriculum);
+      setStr('Grade', p.grade);
+      setStr('OrientationCompletion', p.orientation);
+      setStr('StudentName', p.name);
+      setStr('StudentFirstName', (p.name || '').trim().split(/\s+/)[0] || '');
+      
+      setStr('HouseName', userHouseName);
+      setStr('HousePosition', userHouseData ? userHouseData.positionStr : "");
+
+      if (leadingHouse) {
+         setStr('House_OrientationCompletion', leadingHouse.orientation);
+      }
+
+      // --- Number Bindings ---
+      const setNum = (name, val) => {
+          const prop = overviewVM.number?.(name) ?? overviewVM.getNumber?.(name);
+          if (prop) prop.value = Number(val || 0);
+      };
+
+      setNum('LessonAttendance', p.lessonAttendance);
+      setNum('ModuleCompletion', p.moduleCompletion);
+      setNum('Homework', p.homework);
+      setNum('AssessmentSubmission', p.assessmentSubmission);
+      setNum('ManualPoints', p.manualPoints);
+      
+      setNum('PointsPending', p.pointsPending);
+      setNum('BankedPoints', p.pointsBanked); 
+      setNum('PointsLost', p.pointsLost);
+      setNum('MoneyValue', Number((p.pointsBanked * 0.01).toFixed(2)));
+
+      if (leadingHouse) {
+          setNum('House_LessonAttendance', leadingHouse.lessonAttendance);
+          setNum('House_ModuleCompletion', leadingHouse.moduleCompletion);
+          setNum('House_HomeworkCompletion', leadingHouse.homework);
+          setNum('House_AssessmentSubmission', leadingHouse.assessmentSubmission);
+          setNum('House_ManualPoints', leadingHouse.manualPoints);
+          
+          setNum('HousePoints', leadingHouse.score);
+      } else {
+          setNum('HousePoints', 0);
+      }
+
+      setStr('AttendanceLevel', String(a.attendanceLevel || 0)); 
+      setNum('AttendanceStreak', a.attendanceDay);
+      setStr('HomeworkLevel', String(h.homeworkLevel || 0));
+      setNum('HomeworkStreak', h.homeworkDay);
+
+      // --- Date & Week Logic ---
+      const weekInfo = getCurrentWeekInfo();
+      setNum('WeekNumber', weekInfo.number);
+      setStr('Dates', weekInfo.range);
+
+      // --- Longest Streak Logic ---
+      const attendStreak = a.attendanceDay || 0;
+      const homeStreak   = h.homeworkDay || 0;
+      let longestVal = 0;
+      let longestCat = "";
+
+      if (attendStreak >= homeStreak) {
+          longestVal = attendStreak;
+          longestCat = "Attendance";
+      } else {
+          longestVal = homeStreak;
+          longestCat = "Homework";
+      }
+
+      setNum('LongestStreak', longestVal);
+      setStr('LongestStreakCat', longestCat);
+
+      // --- Enum Bindings ---
+      const ps1 = overviewVM.enum?.('PointsStatusEnum1') ?? overviewVM.getEnum?.('PointsStatusEnum1');
+      if (ps1) {
+          try { ps1.value = normalizePointsStatus(p.status) ?? null; } catch { }
+      }
+      
+      const levelEnum = overviewVM.enum?.('Level') ?? overviewVM.getEnum?.('Level');
+      if (levelEnum) {
+        let lvl = 'Default';
+        if (datasets.points?.map?.has(preferUserId)) {
+             if (p.change > 0) lvl = 'Up';
+             else if (p.change < 0) lvl = 'Reset';
+             else lvl = 'Neutral';
+        }
+        try { levelEnum.value = lvl; } catch { }
+      }
+    }
+
+    // 8.2 Render Helper: Visibility
+    function setEntryVisible(entryVM, show) {
+      const vis = entryVM?.boolean?.('Visible') ?? entryVM?.getBoolean?.('Visible');
+      if (vis && 'value' in vis) vis.value = !!show;
+    }
+
+    // 8.3 Core Rendering Logic
+    function renderTable(rows) {
+      if (!vm1) {
+          console.warn("Main ViewModel (vm1) not loaded yet.");
+          return;
+      }
+
+      // CASE A: HOUSE MODE
+      // Loops through instances House1, House2, House3, House4
+      if (active === 'houses') {
+         const houseRows = datasets.houses.rows; 
+         for (let i = 1; i <= 4; i++) {
+            const childName = `House${i}`;
+            const houseVM = vm1.viewModel ? vm1.viewModel(childName) : vm1.getViewModel(childName);
+            if (!houseVM) continue;
+            writeHouseEntry(houseVM, houseRows[i - 1]);
+         }
+         return; 
+      }
+
+      // CASE B: STUDENT MODE
+      
+      // 1. Update Podium (Hero Slots 1-3)
+      // These instances are named _1, _2, _3 in ViewModel1
+      for (let i = 1; i <= HERO_SLOTS; i++) {
+         const vmName = `_${i}`;
+         
+         // Look on root VM first
+         let heroVM = vm1.viewModel ? vm1.viewModel(vmName) : vm1.getViewModel(vmName);
+
+         // Fallback: Look inside Overview
+         if (!heroVM) {
+             const overviewVM = vm1.viewModel ? vm1.viewModel('Overview') : vm1.getViewModel('Overview');
+             if (overviewVM) {
+                 heroVM = overviewVM.viewModel ? overviewVM.viewModel(vmName) : overviewVM.getViewModel(vmName);
+             }
+         }
+
+         if (heroVM) {
+             const row = rows[i - 1]; 
+             writeEntry(heroVM, row, i); 
+         }
+      }
+
+      // 2. Update Scrollable List (Slots 4-10)
+      // These instances are named _4, _5, _6... in ViewModel1
+      const firstIdx = HERO_SLOTS + pageIndex * TABLE_SLOTS;
+      const remaining = Math.max(0, rows.length - HERO_SLOTS - pageIndex * TABLE_SLOTS);
+      const rowsThisPage = Math.min(TABLE_SLOTS, remaining);
+
+      // Write active rows
+      for (let j = 0; j < rowsThisPage; j++) {
+        const slot = TABLE_START_SLOT + j; 
+        const vmName = `_${slot}`; 
+        
+        const entryVM = vm1.viewModel ? vm1.viewModel(vmName) : vm1.getViewModel(vmName);
+        if (!entryVM) continue;
+
+        const row = rows[firstIdx + j];
+        const fallbackPos = HERO_SLOTS + (pageIndex * TABLE_SLOTS) + j + 1;
+        
+        setEntryVisible(entryVM, true);
+        writeEntry(entryVM, row, fallbackPos);
+      }
+      
+      // Clear empty rows
+      for (let j = rowsThisPage; j < TABLE_SLOTS; j++) {
+        const slot = TABLE_START_SLOT + j;
+        const vmName = `_${slot}`;
+        
+        const entryVM = vm1.viewModel ? vm1.viewModel(vmName) : vm1.getViewModel(vmName);
+        if (!entryVM) continue;
+        
+        setEntryVisible(entryVM, false);
+        writeEntry(entryVM, null, 0);
+      }
+    }
+    
+    // 8.4 Data Writer: Houses
+    function writeHouseEntry(houseVM, row) {
+        if (!houseVM) return;
+
+        const setS = (propName, val) => {
+            const p = houseVM.string?.(propName) ?? houseVM.getString?.(propName);
+            if (p) p.value = String(val);
+        };
+        const setN = (propName, val) => {
+            const p = houseVM.number?.(propName) ?? houseVM.getNumber?.(propName);
+            if (p) p.value = Number(val);
+        };
+        
+        if (!row) {
+             setN('House_Position', 0);
+             setS('House_Name', '');
+             setN('House_TotalPoints', 0);
+             return;
+        }
+
+        setN('House_Position', row.position ?? 0);
+        setS('House_Name', row.name ?? '');
+        
+        setN('House_LessonAttendance', row.lessonAttendance ?? 0);
+        setN('House_HomeworkCompletion', row.homework ?? 0);
+        setN('House_ModuleCompletion', row.moduleCompletion ?? 0);
+        setN('House_AssessmentSubmission', row.assessmentSubmission ?? 0);
+        setN('House_ManualPoints', row.manualPoints ?? 0);
+        setN('House_TotalPoints', row.score ?? 0);
+        
+        setS('House_OrientationCompletion', row.orientation ?? "0%");
+    }
+
+    // 8.5 Data Writer: Students (Rows)
+    function writeEntry(entryVM, row, fallbackPosition) {
+      
+      const setS = (keys, val) => {
+          if (!Array.isArray(keys)) keys = [keys];
+          for (const k of keys) {
+              const p = entryVM.string?.(k) ?? entryVM.getString?.(k);
+              if (p) { p.value = String(val); return; }
+          }
+      };
+      const setN = (keys, val) => {
+          if (!Array.isArray(keys)) keys = [keys];
+          for (const k of keys) {
+              const p = entryVM.number?.(k) ?? entryVM.getNumber?.(k);
+              if (p) { p.value = Number(val); return; }
+          }
+      };
+
+      const ps3 = entryVM.enum?.('PointsStatusEnum3') ?? entryVM.getEnum?.('PointsStatusEnum3');
+      const statusEnum = entryVM.enum?.('StatusEnum') ?? entryVM.getEnum?.('StatusEnum');
+
+      if (row) {
+        // Standard Fields
+        setN(['Position', 'StudentPosition'], row.position ?? fallbackPosition ?? 0);
+        setS(['Name', 'StudentName', 'HouseName'], row.name ?? '');
+
+        // General Stats (Applicable to all views)
+        setN('ManualPoints', row.manualPoints ?? 0);
+        setS('OrientationCompletion', row.orientation ?? ''); 
+
+        // Icon Logic
+        if (ps3) {
+          if (active === 'houses') {
+             try { ps3.value = row.name; } catch { }
+          } else {
+             try { ps3.value = getPointsStatusForUser(row?.userId) ?? null; } catch { }
+          }
+        }
+
+        // Mode-Specific Stats
+        if (active === 'points') {
+          setN('LessonAttendance', row.lessonAttendance ?? 0);
+          setN('ModuleCompletion', row.moduleCompletion ?? 0);
+          setN('Homework', row.homework ?? 0);
+          setN('AssessmentSubmission', row.assessmentSubmission ?? 0);
+          setN(['Score', 'StudentScore'], row.score ?? 0);
+          setN('ChangeState', row.change ?? 0);
+        
+        } else if (active === 'houses') {
+          // In House Mode, write mapped stats to both standard and 'House_' keys
+          setN(['LessonAttendance', 'House_LessonAttendance'], row.lessonAttendance ?? 0);
+          setN(['ModuleCompletion', 'House_ModuleCompletion'], row.moduleCompletion ?? 0);
+          setN(['Homework', 'House_HomeworkCompletion'], row.homework ?? 0);
+          setN(['AssessmentSubmission', 'House_AssessmentSubmission'], row.assessmentSubmission ?? 0);
+          setN(['Score', 'HousePoints', 'Total'], row.score ?? 0);
+          setN('ChangeState', 0);
+
+        } else if (active === 'attendance') {
+          setN('LessonAttendance', row.attendanceLevel ?? 0);
+          setN('ModuleCompletion', row.attendanceDay ?? 0);
+          setN(['Homework', 'AssessmentSubmission', 'ChangeState'], 0);
+          setN(['Score', 'StudentScore'], row.attendanceDay ?? 0);
+        
+        } else if (active === 'homework') {
+          setN('Homework', row.homeworkLevel ?? 0);
+          setN('AssessmentSubmission', row.homeworkDay ?? 0);
+          setN(['LessonAttendance', 'ModuleCompletion', 'ChangeState'], 0);
+          setN(['Score', 'StudentScore'], row.homeworkDay ?? 0);
+        }
+
+        // Status Logic
+        setS('Status', row.status || '');
+        if (statusEnum) {
+            if (active === 'houses') {
+                try { statusEnum.value = null; } catch { }
+            } else if (active === 'points') {
+                try { statusEnum.value = 'Points'; } catch { }
+            } else {
+                const v = (row.status || '').trim();
+                if (['On Track', 'Streak Warning', 'Level Reset'].includes(v)) {
+                   try { statusEnum.value = v; } catch { }
+                }
+            }
+        }
+
+      } else {
+        // Reset Empty Slots
+        if (ps3) { try { ps3.value = null; } catch { } }
+        setN(['Position', 'Score', 'ChangeState', 'LessonAttendance', 'ModuleCompletion', 'Homework', 'AssessmentSubmission', 'ManualPoints'], 0);
+        setS(['Name', 'HouseName', 'Status', 'OrientationCompletion'], '');
+      }
+    }
+
+    // 8.6 Data Writer: Student Panel (The "Me" Card)
+    function writeStudentEverywhere(row) {
+      const tries = [];
+      tries.push(studentVM);
+      tries.push((typeof r.viewModelInstance === 'function' ? r.viewModelInstance('Student') : r.viewModelInstance) || null);
+      tries.push(r.contents?.viewModel?.('Student')?.instance?.() || null);
+      const ui = vm1?.viewModel?.('UserInfo') || vm1?.getViewModel?.('UserInfo');
+      tries.push(ui?.viewModel?.('Student') || ui?.getViewModel?.('Student') || null);
+      const uniq = [...new Set(tries.filter(Boolean))];
+      for (const inst of uniq) writeStudent(inst, row);
+    }
+
+    function writeStudent(svm, row) {
+      if (!svm) return;
+
+      const sName = svm.string?.('StudentName') ?? svm.getString?.('StudentName');
+      const sHouse = svm.string?.('HouseName') ?? svm.getString?.('HouseName'); 
+      const sPos = svm.number?.('StudentPosition') ?? svm.getNumber?.('StudentPosition');
+      const sChange = svm.number?.('StudentChange') ?? svm.getNumber?.('StudentChange'); 
+      const sScore = svm.number?.('StudentScore') ?? svm.getNumber?.('StudentScore');
+      const sStatus = svm.string?.('Status') ?? svm.getString?.('Status');
+      const ps2 = svm.enum?.('PointsStatusEnum2') ?? svm.getEnum?.('PointsStatusEnum2');
+      const sStatusEnum = svm.enum?.('StatusEnum') ?? svm.getEnum?.('StatusEnum');
+
+      if (!row) {
+        if (sName) sName.value = '';
+        if (sHouse) sHouse.value = '';
+        if (sPos) sPos.value = 0;
+        if (sChange) sChange.value = 0;
+        if (sScore) sScore.value = 0;
+        if (sStatus) sStatus.value = '';
+        if (ps2) try { ps2.value = null; } catch {}
         return;
       }
 
-      writeOverview();
+      if (sName) sName.value = row.name ?? '';
+      if (sHouse) sHouse.value = row.house ?? ''; 
+      
+      // Use calculated Position
+      if (sPos) sPos.value = row.position || 0;
+      
+      if (sChange) sChange.value = row.change ?? 0;
 
-      const mode0 = readModeFromBooleans(true);
-      setMode(mode0, { resetPage: true });
-
-      setLoaded(true);
-      console.log("[READY] Leaderboard loaded");
-
-      // Poll for Rive-initiated boolean flips
-      let lastMode = mode0;
-      setInterval(() => {
-        const m = readModeFromBooleans(false);
-        if (m !== lastMode) {
-          lastMode = m;
-          setMode(m, { resetPage: true });
-        }
-      }, 300);
-    }
-  });
-
-  function resolveStudentVM(r, vm1) {
-    const candidates = [];
-    try { const v = vm1?.viewModel?.('Student') || vm1?.getViewModel?.('Student'); if (v) candidates.push(['vm1->Student', v]); } catch {}
-    try { const v = (typeof r.viewModelInstance === 'function' ? r.viewModelInstance('Student') : r.viewModelInstance); if (v) candidates.push(['r.viewModelInstance(Student)', v]); } catch {}
-    try { const v = r.contents?.viewModel?.('Student')?.instance?.(); if (v) candidates.push(['contents->Student.instance()', v]); } catch {}
-    try { const ui = vm1?.viewModel?.('UserInfo') || vm1?.getViewModel?.('UserInfo'); const v = ui?.viewModel?.('Student') || ui?.getViewModel?.('Student'); if (v) candidates.push(['vm1->UserInfo->Student', v]); } catch {}
-    const hit = candidates.find(([_, inst]) => !!inst) || null;
-    return hit ? hit[1] : null;
-  }
-
-  /* ======================================================================= */
-  /*  6) MODE / PAGINATION / OVERVIEW                                         */
-  /* ======================================================================= */
-
-  function readModeFromBooleans(verbose=false) {
-    const getB = (k) => {
-      const b = (vm1?.boolean?.(k) ?? vm1?.getBoolean?.(k));
-      return b && 'value' in b ? !!b.value : false;
-    };
-    const p = getB('isPoints');
-    const a = getB('isAttendance');
-    const h = getB('isHomework');
-    const mode = p ? 'points' : a ? 'attendance' : h ? 'homework' : 'points';
-    if (verbose) console.log('[MODE] flags →', {isPoints:p, isAttendance:a, isHomework:h, mode});
-    return mode;
-  }
-
-  function setStudentPointsVsStreaks(isPointsMode) {
-    const tries = [];
-    tries.push(studentVM);
-    tries.push((typeof r.viewModelInstance === 'function' ? r.viewModelInstance('Student') : r.viewModelInstance) || null);
-    tries.push(r.contents?.viewModel?.('Student')?.instance?.() || null);
-    const ui = vm1?.viewModel?.('UserInfo') || vm1?.getViewModel?.('UserInfo');
-    tries.push(ui?.viewModel?.('Student') || ui?.getViewModel?.('Student') || null);
-    const uniq = [...new Set(tries.filter(Boolean))];
-    for (const inst of uniq) {
-      const prop = inst?.boolean?.('PointsvsStreaks') ?? inst?.getBoolean?.('PointsvsStreaks');
-      if (prop && 'value' in prop) prop.value = !!isPointsMode;
-    }
-  }
-
-  function setMode(which, { resetPage }) {
-    active = which;
-
-    // Points → false, Streaks (attendance/homework) → true
-setStudentPointsVsStreaks(active == 'points');
-
-
-    const ds = datasets[active];
-    if (!ds) { console.warn('[MODE] unknown dataset', which); return; }
-
-    ds.pages = computeTotalPages(ds.rows.length);
-    pageIndex = resetPage ? 0 : Math.min(pageIndex, ds.pages - 1);
-
-    renderHero(ds.rows);
-
-    const preferUserId = getPreferredUserId();
-    let rowForPanels = pickRowByUserStrict(ds, preferUserId);
-    if (!rowForPanels) rowForPanels = synthesizeUserRow(preferUserId);
-    writeStudentEverywhere(rowForPanels);
-
-    writePageNumbers(ds.pages);
-    renderTable(ds.rows);
-    firePlay();
-  }
-
-  function goPage(delta) {
-    const ds = datasets[active];
-    const next = Math.min(Math.max(pageIndex + delta, 0), ds.pages - 1);
-    if (next === pageIndex) return;
-    pageIndex = next;
-    writePageNumbers(ds.pages);
-    renderTable(ds.rows);
-    firePlay();
-  }
-
-  function writePageNumbers(totalPages) {
-    const pi = vm1?.number?.('PageIndex')  ?? vm1?.getNumber?.('PageIndex');
-    const tp = vm1?.number?.('TotalPages') ?? vm1?.getNumber?.('TotalPages');
-    if (pi) pi.value = pageIndex + 1;
-    if (tp) tp.value = totalPages;
-  }
-
-  function writeOverview() {
-    if (!overviewVM) return;
-
-    const preferUserId = getPreferredUserId();
-
-    // Set Overview enum from Points sheet "Status"
-const ps1 = overviewVM.enum?.('PointsStatusEnum1') ?? overviewVM.getEnum?.('PointsStatusEnum1');
-if (ps1) { try { ps1.value = getPointsStatusForUser(preferUserId) ?? null; } catch {} }
-console.log('[Overview Enum]', preferUserId, '→', getPointsStatusForUser(preferUserId));
-
-    let p = pickRowByUserStrict(datasets.points,     preferUserId);
-    let a = pickRowByUserStrict(datasets.attendance, preferUserId);
-    let h = pickRowByUserStrict(datasets.homework,   preferUserId);
-
-    if (!p) p = synthesizeUserRow(preferUserId);
-    if (!a) a = synthesizeUserRow(preferUserId);
-    if (!h) h = synthesizeUserRow(preferUserId);
-
-
-    // Set Overview.Level enum from Points "Change" (Up/Neutral/Reset; else Default)
-const levelEnum = overviewVM.enum?.('Level') ?? overviewVM.getEnum?.('Level');
-if (levelEnum) {
-  let lvl = 'Default';
-  // only use the real Points row if it exists
-  const hasRealPoints = datasets.points?.map?.has(preferUserId);
-  if (hasRealPoints) {
-    const ch = Number(p?.change ?? 0);
-    if (ch > 0) lvl = 'Up';
-    else if (ch < 0) lvl = 'Reset';
-    else lvl = 'Neutral';
-  }
-  try { levelEnum.value = lvl; } catch {}
-}
-
-// Overview.ChangeAmount ← Points "Change" (number)
-const changeAmt = overviewVM.number?.('ChangeAmount') ?? overviewVM.getNumber?.('ChangeAmount');
-if (changeAmt) {
-  const hasRealPoints = datasets.points?.map?.has(preferUserId); // avoid synthesized default
-  const val = hasRealPoints ? Number(p?.change ?? 0) : 0;
-  changeAmt.value = isFinite(val) ? val : 0;
-}
-
-
-
-    const v = {
-      StudentName:          overviewVM.string?.('StudentName')         ?? overviewVM.getString?.('StudentName'),
-      StudentFirstName:     overviewVM.string?.('StudentFirstName')    ?? overviewVM.getString?.('StudentFirstName'),
-      AttendanceLevel:      overviewVM.number?.('AttendanceLevel')     ?? overviewVM.getNumber?.('AttendanceLevel'),
-      AttendanceStreak:     overviewVM.number?.('AttendanceStreak')    ?? overviewVM.getNumber?.('AttendanceStreak'),
-      LessonAttendance:     overviewVM.number?.('LessonAttendance')    ?? overviewVM.getNumber?.('LessonAttendance'),
-      ModuleCompletion:     overviewVM.number?.('ModuleCompletion')    ?? overviewVM.getNumber?.('ModuleCompletion'),
-      Homework:             overviewVM.number?.('Homework')            ?? overviewVM.getNumber?.('Homework'),
-      AssessmentSubmission: overviewVM.number?.('AssessmentSubmission') ?? overviewVM.getNumber?.('AssessmentSubmission'),
-      TotalPoints:          overviewVM.number?.('TotalPoints')         ?? overviewVM.getNumber?.('TotalPoints'),
-      HomeworkLevel:        overviewVM.number?.('HomeworkLevel')       ?? overviewVM.getNumber?.('HomeworkLevel'),
-      HomeworkStreak:       overviewVM.number?.('HomeworkStreak')      ?? overviewVM.getNumber?.('HomeworkStreak'),
-    };
-
-    const name = p?.name || a?.name || h?.name || '';
-    const first = (name || '').trim().split(/\s+/)[0] || '';
-    if (v.StudentFirstName) v.StudentFirstName.value = first;
-
-    if (v.StudentName)          v.StudentName.value          = name;
-    if (v.TotalPoints)          v.TotalPoints.value          = p?.score ?? 0; // Current Total Points
-    if (v.LessonAttendance)     v.LessonAttendance.value     = p?.lessonAttendance ?? 0;
-    if (v.ModuleCompletion)     v.ModuleCompletion.value     = p?.moduleCompletion ?? 0;
-    if (v.Homework)             v.Homework.value             = p?.homework ?? 0;
-    if (v.AssessmentSubmission) v.AssessmentSubmission.value = p?.assessmentSubmission ?? 0;
-    if (v.AttendanceLevel)      v.AttendanceLevel.value      = a?.attendanceLevel ?? 0;
-    if (v.AttendanceStreak)     v.AttendanceStreak.value     = a?.attendanceDay   ?? 0;
-    if (v.HomeworkLevel)        v.HomeworkLevel.value        = h?.homeworkLevel   ?? 0;
-    if (v.HomeworkStreak)       v.HomeworkStreak.value       = h?.homeworkDay     ?? 0;
-  }
-
-  /* ======================================================================= */
-  /*  7) RENDERING (rows + student panel)                                     */
-  /* ======================================================================= */
-
-  function setEntryVisible(entryVM, show) {
-    const vis = entryVM?.boolean?.('Visible') ?? entryVM?.getBoolean?.('Visible');
-    if (vis && 'value' in vis) vis.value = !!show;
-  }
-
-  function renderHero(rows) {
-    for (let i = 0; i < HERO_SLOTS; i++) {
-      const slotName = String(i + 1);
-      const entryVM = vm1?.viewModel?.(slotName) || vm1?.getViewModel?.(slotName);
-      const row = rows[i];
-      if (!entryVM) continue;
-      setEntryVisible(entryVM, !!row);
-      writeEntry(entryVM, row, i + 1);
-    }
-  }
-
-  function renderTable(rows) {
-    const firstIdx = HERO_SLOTS + pageIndex * TABLE_SLOTS;
-    const remaining = Math.max(0, rows.length - HERO_SLOTS - pageIndex * TABLE_SLOTS);
-    const rowsThisPage = Math.min(TABLE_SLOTS, remaining);
-
-    for (let j = 0; j < rowsThisPage; j++) {
-      const slot = TABLE_START_SLOT + j;
-      const entryVM = vm1?.viewModel?.(String(slot)) || vm1?.getViewModel?.(String(slot));
-      if (!entryVM) continue;
-      const row = rows[firstIdx + j];
-      const fallbackPos = HERO_SLOTS + (pageIndex * TABLE_SLOTS) + j + 1;
-      setEntryVisible(entryVM, true);
-      writeEntry(entryVM, row, fallbackPos);
-    }
-    for (let j = rowsThisPage; j < TABLE_SLOTS; j++) {
-      const slot = TABLE_START_SLOT + j;
-      const entryVM = vm1?.viewModel?.(String(slot)) || vm1?.getViewModel?.(String(slot));
-      if (!entryVM) continue;
-      setEntryVisible(entryVM, false);
-      writeEntry(entryVM, null, 0);
-    }
-  }
-
-  function writeEntry(entryVM, row, fallbackPosition) {
-
-    const ps3 = entryVM.enum?.('PointsStatusEnum3') ?? entryVM.getEnum?.('PointsStatusEnum3');
-    const posProp     = entryVM.number?.('Position')             ?? entryVM.getNumber?.('Position');
-    const nameProp    = entryVM.string?.('Name')                  ?? entryVM.getString?.('Name');
-    const scoreProp   = entryVM.number?.('Score')                 ?? entryVM.getNumber?.('Score');
-    const changeProp  = entryVM.number?.('ChangeState')           ?? entryVM.getNumber?.('ChangeState');
-    const asProp      = entryVM.number?.('AssessmentSubmission')  ?? entryVM.getNumber?.('AssessmentSubmission');
-    const hwProp      = entryVM.number?.('Homework')              ?? entryVM.getNumber?.('Homework');
-    const mcProp      = entryVM.number?.('ModuleCompletion')      ?? entryVM.getNumber?.('ModuleCompletion');
-    const laProp      = entryVM.number?.('LessonAttendance')      ?? entryVM.getNumber?.('LessonAttendance');
-    const statusProp  = entryVM.string?.('Status')                ?? entryVM.getString?.('Status');
-    const statusEnum  = entryVM.enum?.('StatusEnum')              ?? entryVM.getEnum?.('StatusEnum');
-
-    if (row) {
-      if (posProp)  posProp.value  = row.position ?? fallbackPosition ?? 0;
-      if (nameProp) nameProp.value = row.name ?? '';
-      if (ps3) {
-  const val = getPointsStatusForUser(row?.userId); // always from Points sheet
-  try { ps3.value = val ?? null; } catch {}
-  console.log('[Entry Enum]', row?.name, '→', getPointsStatusForUser(row?.userId));
-
-}
-
+      if (ps2) { 
+          try { ps2.value = normalizePointsStatus(row.status) ?? null; } catch { } 
+      }
 
       if (active === 'points') {
-        if (laProp) laProp.value = row.lessonAttendance ?? 0;
-        if (mcProp) mcProp.value = row.moduleCompletion ?? 0;
-        if (hwProp) hwProp.value = row.homework ?? 0;
-        if (asProp) asProp.value = row.assessmentSubmission ?? 0;
-        if (scoreProp)  scoreProp.value  = row.score ?? 0;          // from Current Total Points
-        if (changeProp) changeProp.value = row.change ?? 0;
+        if (sScore) sScore.value = row.score ?? 0;
       } else if (active === 'attendance') {
-        if (laProp) laProp.value = row.attendanceLevel ?? 0;
-        if (mcProp) mcProp.value = row.attendanceDay   ?? 0;
-        if (hwProp) hwProp.value = 0;
-        if (asProp) asProp.value = 0;
-        if (scoreProp)  scoreProp.value  = row.attendanceDay ?? 0;  // days shown as Score
-        if (changeProp) changeProp.value = 0;
+        if (sScore) sScore.value = row.attendanceLevel ?? 0;
       } else if (active === 'homework') {
-        if (hwProp) hwProp.value = row.homeworkLevel ?? 0;
-        if (asProp) asProp.value = row.homeworkDay   ?? 0;
-        if (laProp) laProp.value = 0;
-        if (mcProp) mcProp.value = 0;
-        if (scoreProp)  scoreProp.value  = row.homeworkDay ?? 0;    // days shown as Score
-        if (changeProp) changeProp.value = 0;
+        if (sScore) sScore.value = row.homeworkLevel ?? 0;
       }
 
-      // Always write the status text; set enum only for streak modes
-      if (statusProp) statusProp.value = row.status || '';
-      if (statusEnum && active !== 'points') {
-        const v = (row.status || '').trim();
-        if (v === 'On Track' || v === 'Streak Warning' || v === 'Level Reset') {
-          try { statusEnum.value = v; } catch {}
+      const sv = (row.status || '').trim();
+      if (sStatus) sStatus.value = sv;
+
+      if (sStatusEnum && active !== 'points') {
+        if (sv === 'On Track' || sv === 'Streak Warning' || sv === 'Level Reset') {
+          try { sStatusEnum.value = sv; } catch { }
         }
-      } else if (statusEnum && active === 'points') {
-  // NEW: when Points mode is active, set all StatusEnums to "Points"
-  try { statusEnum.value = 'Points'; } catch {}
-}
-
-
-    } else {
-      if (ps3) { try { ps3.value = null; } catch {} }
-      if (posProp)    posProp.value    = fallbackPosition || 0;
-      if (nameProp)   nameProp.value   = '';
-      if (scoreProp)  scoreProp.value  = 0;
-      if (changeProp) changeProp.value = 0;
-      if (laProp)     laProp.value     = 0;
-      if (mcProp)     mcProp.value     = 0;
-      if (hwProp)     hwProp.value     = 0;
-      if (asProp)     asProp.value     = 0;
-      if (statusProp) statusProp.value = '';
-    }
-  }
-
-  function writeStudentEverywhere(row) {
-    const tries = [];
-    tries.push(studentVM);
-    tries.push((typeof r.viewModelInstance === 'function' ? r.viewModelInstance('Student') : r.viewModelInstance) || null);
-    tries.push(r.contents?.viewModel?.('Student')?.instance?.() || null);
-    const ui = vm1?.viewModel?.('UserInfo') || vm1?.getViewModel?.('UserInfo');
-    tries.push(ui?.viewModel?.('Student') || ui?.getViewModel?.('Student') || null);
-    const uniq = [...new Set(tries.filter(Boolean))];
-    for (const inst of uniq) writeStudent(inst, row);
-  }
-
-  // Student panel mirrors per-mode values (and status)
-  function writeStudent(svm, row) {
-    const ps2 = svm?.enum?.('PointsStatusEnum2') ?? svm?.getEnum?.('PointsStatusEnum2');
-    const sName  = svm?.string?.('StudentName')     ?? svm?.getString?.('StudentName');
-    const sPos   = svm?.number?.('StudentPosition') ?? svm?.getNumber?.('StudentPosition');
-    const sScore = svm?.number?.('StudentScore')    ?? svm?.getNumber?.('StudentScore');
-    const sChg   = svm?.number?.('StudentChange')   ?? svm?.getNumber?.('StudentChange');
-
-    const sStatus = svm?.string?.('Status') ?? svm?.getString?.('Status');
-    const sStatusEnum = svm?.enum?.('StatusEnum') ?? svm?.getEnum?.('StatusEnum');
-
-    if (!row) {
-      if (ps2) { try { ps2.value = null; } catch {} }
-      if (sName)  sName.value  = '';
-      if (sPos)   sPos.value   = 0;
-      if (sScore) sScore.value = 0;
-      if (sChg)   sChg.value   = 0;
-      if (sStatus) sStatus.value = '';
-      return;
-    }
-
-    if (sName) sName.value = row.name ?? '';
-    if (sPos)  sPos.value  = row.position ?? 0;
-    if (ps2) { try { ps2.value = getPointsStatusForUser(row?.userId) ?? null; } catch {} }
-    console.log('[Student Enum]', row?.name, '→', getPointsStatusForUser(row?.userId));
-
-
-
-    if (active === 'points') {
-      if (sScore) sScore.value = row.score ?? 0;      // Current Total Points
-      if (sChg)   sChg.value   = row.change ?? 0;
-    } else if (active === 'attendance') {
-      if (sScore) sScore.value = row.attendanceLevel ?? 0;
-      if (sChg)   sChg.value   = row.attendanceDay   ?? 0;
-    } else if (active === 'homework') {
-      if (sScore) sScore.value = row.homeworkLevel ?? 0;
-      if (sChg)   sChg.value   = row.homeworkDay   ?? 0;
-    }
-
-    // mirror status into Student panel; enum only in streak modes
-    const sv = (row.status || '').trim();
-    if (sStatus) sStatus.value = sv;
-    if (sStatusEnum && active !== 'points') {
-      if (sv === 'On Track' || sv === 'Streak Warning' || sv === 'Level Reset') {
-        try { sStatusEnum.value = sv; } catch {}
+      } else if (sStatusEnum && active === 'points') {
+        try { sStatusEnum.value = null; } catch { }
       }
-    } else if (sStatusEnum && active === 'points') {
-      // Optional: clear enum in points mode.
-      try { sStatusEnum.value = null; } catch {}
+      
+      const id = getOktaIdentity();
+      if (row.email && id.email && row.email === id.email && id.fullName && sName) {
+        sName.value = id.fullName;
+      }
     }
 
-    // Prefer Okta name if this is the logged-in viewer
-    if (row.email && row.email === OKTA_STUDENT_EMAIL && OKTA_FULL_NAME && sName) {
-      sName.value = OKTA_FULL_NAME;
+
+    /* =======================================================================
+       9.0 INTERACTION & STATE LOGIC
+       ======================================================================= */
+
+    // Reads current tab state from Rive boolean inputs
+    function readModeFromBooleans(verbose = false) {
+      const getB = (k) => {
+        const b = (vm1?.boolean?.(k) ?? vm1?.getBoolean?.(k));
+        return b && 'value' in b ? !!b.value : false;
+      };
+      const p = getB('isPoints');
+      const a = getB('isAttendance');
+      const h = getB('isHomework');
+      const houseMode = getB('isHouses'); 
+
+      // Priority: Houses > Points > Attendance > Homework
+      if (houseMode) return 'houses';
+      if (p) return 'points';
+      if (a) return 'attendance';
+      if (h) return 'homework';
+      
+      return 'points'; // Default Fallback
     }
-  }
 
-  /* ======================================================================= */
-  /*  8) RIVE BRIDGES                                                         */
-  /* ======================================================================= */
+    function setStudentPointsVsStreaks(isPointsMode) {
+      const tries = [];
+      tries.push(studentVM);
+      tries.push((typeof r.viewModelInstance === 'function' ? r.viewModelInstance('Student') : r.viewModelInstance) || null);
+      tries.push(r.contents?.viewModel?.('Student')?.instance?.() || null);
+      const ui = vm1?.viewModel?.('UserInfo') || vm1?.getViewModel?.('UserInfo');
+      tries.push(ui?.viewModel?.('Student') || ui?.getViewModel?.('Student') || null);
+      const uniq = [...new Set(tries.filter(Boolean))];
+      for (const inst of uniq) {
+        const prop = inst?.boolean?.('PointsvsStreaks') ?? inst?.getBoolean?.('PointsvsStreaks');
+        if (prop && 'value' in prop) prop.value = !!isPointsMode;
+      }
+    }
 
-  function firePlay() {
-    const play = vm1?.trigger?.('Play') || vm1?.getTrigger?.('Play');
-    if (play?.trigger) play.trigger();
-    else if (play?.fire) play.fire();
-  }
+    // Triggers mode switch (View Refresh + Pagination Reset)
+    function setMode(which, { resetPage }) {
+      active = which;
+      setStudentPointsVsStreaks(active == 'points');
 
-  function setLoaded(flag) {
-    const b = vm1?.boolean?.('isLoaded') ?? vm1?.getBoolean?.('isLoaded');
-    if (b && 'value' in b) b.value = !!flag;
-  }
+      const ds = datasets[active];
+      if (!ds) { console.warn('[MODE] unknown dataset', which); return; }
+
+      ds.pages = computeTotalPages(ds.rows.length);
+      pageIndex = resetPage ? 0 : Math.min(pageIndex, ds.pages - 1);
+
+      // Render Podium (Heroes 1-3)
+      // Note: renderHero was deprecated in favor of including this logic in renderTable
+      // We call renderTable to handle both List and Podium
+      
+      const preferUserId = getPreferredUserId();
+      let rowForPanels = pickRowByUserStrict(ds, preferUserId);
+      if (!rowForPanels) rowForPanels = synthesizeUserRow(preferUserId);
+      
+      writeStudentEverywhere(rowForPanels);
+
+      writePageNumbers(ds.pages);
+      renderTable(ds.rows); 
+      firePlay();
+    }
+
+    function goPage(delta) {
+      const ds = datasets[active];
+      const next = Math.min(Math.max(pageIndex + delta, 0), ds.pages - 1);
+      if (next === pageIndex) return;
+      pageIndex = next;
+      writePageNumbers(ds.pages);
+      renderTable(ds.rows);
+      firePlay();
+    }
+
+    function writePageNumbers(totalPages) {
+      const pi = vm1?.number?.('PageIndex') ?? vm1?.getNumber?.('PageIndex');
+      const tp = vm1?.number?.('TotalPages') ?? vm1?.getNumber?.('TotalPages');
+      if (pi) pi.value = pageIndex + 1;
+      if (tp) tp.value = totalPages;
+    }
+
+    function firePlay() {
+      const play = vm1?.trigger?.('Play') || vm1?.getTrigger?.('Play');
+      if (play?.trigger) play.trigger();
+      else if (play?.fire) play.fire();
+    }
+
+    function setLoaded(flag) {
+      const b = vm1?.boolean?.('isLoaded') ?? vm1?.getBoolean?.('isLoaded');
+      if (b && 'value' in b) b.value = !!flag;
+    }
   </script>
 </body>
 </html>
