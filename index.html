@@ -23,12 +23,12 @@
     const BANKING_ENDPOINT = "https://script.google.com/macros/s/AKfycbwg-XbqjbdwEHTX087TWFyNHB-NxYDdNyu4kZpBVZQMK-kzVF_UzUQDkuL3q-nGn53mtw/exec";
 
     // Data Source Configuration (Currently CSV-based)
-    // TODO: The backend developer should replace these with the Secure API Endpoints.
-    const PUB_HTML_URL = "/test_data.csv"; 
-    const BASE_CSV_URL = "/test_data.csv?";
-    const HOUSE_LOCAL_URL = "/house_data.csv?";
-    const ATTENDANCE_LOCAL_URL = "/attendance_data.csv?"; 
-    const HOMEWORK_LOCAL_URL = "/homework_data.csv?";
+    // FIX: Using './' ensures we look in the current repo folder, not the domain root.
+    const PUB_HTML_URL = "./test_data.csv"; 
+    const BASE_CSV_URL = "./test_data.csv?";
+    const HOUSE_LOCAL_URL = "./house_data.csv?";
+    const ATTENDANCE_LOCAL_URL = "./attendance_data.csv?"; 
+    const HOMEWORK_LOCAL_URL = "./homework_data.csv?";
     
     // User Identity Fallback (For local testing/simulation)
     const SIMULATED_USER_LOGIN_ID = "jayde.alderton@teneo.school";
