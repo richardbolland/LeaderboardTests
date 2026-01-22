@@ -833,14 +833,29 @@
       }
 
       // CASE A: HOUSE MODE
-      // Loops through instances House1, House2, House3, House4
       if (active === 'houses') {
          const houseRows = datasets.houses.rows; 
+         
+         // 1. Update List (House1...House4)
          for (let i = 1; i <= 4; i++) {
             const childName = `House${i}`;
             const houseVM = vm1.viewModel ? vm1.viewModel(childName) : vm1.getViewModel(childName);
             if (!houseVM) continue;
             writeHouseEntry(houseVM, houseRows[i - 1]);
+         }
+
+         // 2. Update Podium (_1..._3) with Top 3 Houses
+         // This ensures the main podium shows the leading houses
+         for (let i = 1; i <= HERO_SLOTS; i++) {
+             const vmName = `_${i}`;
+             let heroVM = vm1.viewModel ? vm1.viewModel(vmName) : vm1.getViewModel(vmName);
+             if (!heroVM) {
+                 const overviewVM = vm1.viewModel ? vm1.viewModel('Overview') : vm1.getViewModel('Overview');
+                 if (overviewVM) heroVM = overviewVM.viewModel ? overviewVM.viewModel(vmName) : overviewVM.getViewModel(vmName);
+             }
+             if (heroVM) {
+                 writeEntry(heroVM, houseRows[i - 1], i); // Pass House Data to Entry VM
+             }
          }
          return; 
       }
@@ -848,21 +863,13 @@
       // CASE B: STUDENT MODE
       
       // 1. Update Podium (Hero Slots 1-3)
-      // These instances are named _1, _2, _3 in ViewModel1
       for (let i = 1; i <= HERO_SLOTS; i++) {
          const vmName = `_${i}`;
-         
-         // Look on root VM first
          let heroVM = vm1.viewModel ? vm1.viewModel(vmName) : vm1.getViewModel(vmName);
-
-         // Fallback: Look inside Overview
          if (!heroVM) {
              const overviewVM = vm1.viewModel ? vm1.viewModel('Overview') : vm1.getViewModel('Overview');
-             if (overviewVM) {
-                 heroVM = overviewVM.viewModel ? overviewVM.viewModel(vmName) : overviewVM.getViewModel(vmName);
-             }
+             if (overviewVM) heroVM = overviewVM.viewModel ? overviewVM.viewModel(vmName) : overviewVM.getViewModel(vmName);
          }
-
          if (heroVM) {
              const row = rows[i - 1]; 
              writeEntry(heroVM, row, i); 
@@ -870,16 +877,13 @@
       }
 
       // 2. Update Scrollable List (Slots 4-10)
-      // These instances are named _4, _5, _6... in ViewModel1
       const firstIdx = HERO_SLOTS + pageIndex * TABLE_SLOTS;
       const remaining = Math.max(0, rows.length - HERO_SLOTS - pageIndex * TABLE_SLOTS);
       const rowsThisPage = Math.min(TABLE_SLOTS, remaining);
 
-      // Write active rows
       for (let j = 0; j < rowsThisPage; j++) {
         const slot = TABLE_START_SLOT + j; 
         const vmName = `_${slot}`; 
-        
         const entryVM = vm1.viewModel ? vm1.viewModel(vmName) : vm1.getViewModel(vmName);
         if (!entryVM) continue;
 
@@ -894,10 +898,8 @@
       for (let j = rowsThisPage; j < TABLE_SLOTS; j++) {
         const slot = TABLE_START_SLOT + j;
         const vmName = `_${slot}`;
-        
         const entryVM = vm1.viewModel ? vm1.viewModel(vmName) : vm1.getViewModel(vmName);
         if (!entryVM) continue;
-        
         setEntryVisible(entryVM, false);
         writeEntry(entryVM, null, 0);
       }
@@ -907,25 +909,47 @@
     function writeHouseEntry(houseVM, row) {
         if (!houseVM) return;
 
+        // Helper to set Strings
         const setS = (propName, val) => {
             const p = houseVM.string?.(propName) ?? houseVM.getString?.(propName);
             if (p) p.value = String(val);
         };
+
+        // Helper to set Numbers
         const setN = (propName, val) => {
             const p = houseVM.number?.(propName) ?? houseVM.getNumber?.(propName);
             if (p) p.value = Number(val);
         };
         
+        // NEW: Helper to set Enum
+        const setE = (propName, val) => {
+             const p = houseVM.enum?.(propName) ?? houseVM.getEnum?.(propName);
+             if (p && val) {
+                 try { 
+                     // Rive allows setting Enums by their string name (e.g. "Zenith")
+                     p.value = val; 
+                 } catch (e) { console.warn(`Enum mismatch for ${propName}: ${val}`); }
+             }
+        };
+        
+        // Handle empty rows (Reset everything)
         if (!row) {
              setN('House_Position', 0);
              setS('House_Name', '');
              setN('House_TotalPoints', 0);
+             // Optional: Reset icon to a default if needed, or leave as is
              return;
         }
 
+        // --- MAP PROPERTIES ---
         setN('House_Position', row.position ?? 0);
         setS('House_Name', row.name ?? '');
         
+        // NEW: Set the Icon Enum
+        // Matches 'Zenith', 'Synergy', 'Nexus', 'Lunima' from your row.name
+        setE('HouseIcons', row.name);
+
+        // Stats
         setN('House_LessonAttendance', row.lessonAttendance ?? 0);
         setN('House_HomeworkCompletion', row.homework ?? 0);
         setN('House_ModuleCompletion', row.moduleCompletion ?? 0);
@@ -935,10 +959,9 @@
         
         setS('House_OrientationCompletion', row.orientation ?? "0%");
     }
-
-    // 8.5 Data Writer: Students (Rows)
+    // 8.5 Data Writer: Student Panel (and Podium)
     function writeEntry(entryVM, row, fallbackPosition) {
-      
+      // Helper to safely set a string
       const setS = (keys, val) => {
           if (!Array.isArray(keys)) keys = [keys];
           for (const k of keys) {
@@ -946,6 +969,7 @@
               if (p) { p.value = String(val); return; }
           }
       };
+      // Helper to safely set a number
       const setN = (keys, val) => {
           if (!Array.isArray(keys)) keys = [keys];
           for (const k of keys) {
@@ -953,29 +977,42 @@
               if (p) { p.value = Number(val); return; }
           }
       };
+      // Helper to safely set an Enum (NEW)
+      const setE = (keys, val) => {
+          if (!Array.isArray(keys)) keys = [keys];
+          for (const k of keys) {
+              const p = entryVM.enum?.(k) ?? entryVM.getEnum?.(k);
+              if (p && val) { 
+                  try { p.value = val; return; } catch (e) {} 
+              }
+          }
+      };
 
       const ps3 = entryVM.enum?.('PointsStatusEnum3') ?? entryVM.getEnum?.('PointsStatusEnum3');
       const statusEnum = entryVM.enum?.('StatusEnum') ?? entryVM.getEnum?.('StatusEnum');
 
       if (row) {
-        // Standard Fields
+        // 1. POSITION
         setN(['Position', 'StudentPosition'], row.position ?? fallbackPosition ?? 0);
+
+        // 2. NAMES
         setS(['Name', 'StudentName', 'HouseName'], row.name ?? '');
 
-        // General Stats (Applicable to all views)
+        // 3. STATS
         setN('ManualPoints', row.manualPoints ?? 0);
         setS('OrientationCompletion', row.orientation ?? ''); 
 
-        // Icon Logic
-        if (ps3) {
-          if (active === 'houses') {
-             try { ps3.value = row.name; } catch { }
-          } else {
-             try { ps3.value = getPointsStatusForUser(row?.userId) ?? null; } catch { }
-          }
+        // 4. ICONS (UPDATED)
+        // If in House Mode, try to set 'HouseIcons' using the name (e.g. "Zenith")
+        if (active === 'houses') {
+             setE('HouseIcons', row.name);
+             if (ps3) { try { ps3.value = row.name; } catch { } }
+        } else {
+             // In Student Mode, use the rank status
+             if (ps3) { try { ps3.value = getPointsStatusForUser(row?.userId) ?? null; } catch { } }
         }
 
-        // Mode-Specific Stats
+        // 5. NUMBERS (Based on Active Mode)
         if (active === 'points') {
           setN('LessonAttendance', row.lessonAttendance ?? 0);
           setN('ModuleCompletion', row.moduleCompletion ?? 0);
@@ -985,7 +1022,7 @@
           setN('ChangeState', row.change ?? 0);
         
         } else if (active === 'houses') {
-          // In House Mode, write mapped stats to both standard and 'House_' keys
+          // Write stats to standard inputs (for the Podium Entry VM)
           setN(['LessonAttendance', 'House_LessonAttendance'], row.lessonAttendance ?? 0);
           setN(['ModuleCompletion', 'House_ModuleCompletion'], row.moduleCompletion ?? 0);
           setN(['Homework', 'House_HomeworkCompletion'], row.homework ?? 0);
@@ -1006,7 +1043,7 @@
           setN(['Score', 'StudentScore'], row.homeworkDay ?? 0);
         }
 
-        // Status Logic
+        // 6. TEXT STATUS
         setS('Status', row.status || '');
         if (statusEnum) {
             if (active === 'houses') {
