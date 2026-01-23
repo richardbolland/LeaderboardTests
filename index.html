@@ -20,7 +20,7 @@
        ======================================================================= */
     
     // Endpoint for Banking Transactions (Writing data back to server)
-    const BANKING_ENDPOINT = "https://script.google.com/macros/s/AKfycbwg-XbqjbdwEHTX087TWFyNHB-NxYDdNyu4kZpBVZQMK-kzVF_UzUQDkuL3q-nGn53mtw/exec";
+    const BANKING_ENDPOINT = "https://script.google.com/macros/s/AKfycbxHWOPhhNTkykFDZJYERtZq4DxVGI8CrZYCiaOSH1-hTAcee828kPmAAXW-iCkI9QeBCQ/exec";
 
     // Data Source Configuration (Currently CSV-based)
     // FIX: Using './' ensures we look in the current repo folder, not the domain root.
@@ -31,7 +31,7 @@
     const HOMEWORK_LOCAL_URL = "./homework_data.csv?";
     
     // User Identity Fallback (For local testing/simulation)
-    const SIMULATED_USER_LOGIN_ID = "jayde.alderton@teneo.school";
+    const SIMULATED_USER_LOGIN_ID = "nuha.ryklief@teneo.school";
 
     // Layout Constants (Matches Rive Artboard Structure)
     const HERO_SLOTS = 3;       // Top 3 Podium positions (Instances _1 to _3)
@@ -587,7 +587,7 @@
        ======================================================================= */
 
     r = new rive.Rive({
-      src: 'assets/leaderboard_v2.riv', // Points to the compiled Rive file
+      src: 'assets/leaderboard.riv', // <--- Reverted to original filename (Option B)
       canvas,
       artboard: 'Dashboard',
       stateMachines: ['State Machine 1'],
@@ -598,7 +598,6 @@
         resize();
 
         // 7.1 View Model Resolution
-        // We capture references to key View Models here for later updates.
         vm1 = (typeof r.viewModelInstance === 'function' ? r.viewModelInstance('ViewModel1') : null) ||
               r.viewModelInstance || r.contents?.viewModel?.('ViewModel1')?.instance?.();
 
@@ -633,28 +632,31 @@
              const currentPending = pendingProp ? pendingProp.value : 0;
              const currentBanked  = bankedProp  ? bankedProp.value  : 0;
 
-             // Logic: Add Pending to Banked, Calculate Money as 1% of NEW total
              const newTotalPoints = currentBanked + currentPending;
              const newTotalMoney = Number((newTotalPoints * 0.01).toFixed(2));
 
              console.log(`🧮 Math: Pending (${currentPending}) + Banked (${currentBanked}) = New (${newTotalPoints}) | Money: ${newTotalMoney}`);
 
-             // Update Rive UI immediately
              if (bankedProp)  bankedProp.value  = newTotalPoints;  
              if (moneyProp)   moneyProp.value   = newTotalMoney;   
              if (pendingProp) pendingProp.value = 0;               
 
-             // Sync with Backend
              const userEmail = getPreferredUserId(); 
              if (currentPending <= 0) return;
              
              const moneyEarnedThisTransaction = Number((currentPending * 0.01).toFixed(2));
+             const weekNum = getCurrentWeekInfo().number; 
 
              fetch(BANKING_ENDPOINT, {
                  method: "POST", mode: "no-cors", headers: { "Content-Type": "text/plain" },
-                 body: JSON.stringify({ email: userEmail, points: currentPending, moneyEarned: moneyEarnedThisTransaction })
+                 body: JSON.stringify({ 
+                     email: userEmail, 
+                     points: currentPending, 
+                     moneyEarned: moneyEarnedThisTransaction,
+                     week: `Week ${weekNum}`
+                 })
              })
-             .then(() => console.log("✅ Bank request sent!"))
+             .then(() => console.log(`✅ Bank request sent for Week ${weekNum}!`))
              .catch(err => console.error("❌ Banking failed:", err));
              return; 
           }
@@ -675,12 +677,42 @@
 
         // 7.4 Start Application
         writeOverview();
+        
+        // --- preLaunch Date Check ---
+        const preLaunchProp = vm1?.boolean?.('preLaunch') ?? vm1?.getBoolean?.('preLaunch');
+        if (preLaunchProp) {
+            // Target: Feb 2, 2026 (Month is 0-indexed)
+            const targetDate = new Date(2026, 1, 2); 
+            const now = new Date();
+            
+            if (now >= targetDate) {
+                console.log("🚀 Launch Date Reached: Setting preLaunch to TRUE.");
+                preLaunchProp.value = true;
+            } else {
+                preLaunchProp.value = false;
+            }
+        }
+
+        // --- NEW: Dev Mode Listener ---
+        // Type "devmode" on your keyboard to force launch
+        let keyBuffer = "";
+        window.addEventListener('keydown', (e) => {
+            keyBuffer += e.key.toLowerCase();
+            // Keep buffer short
+            if (keyBuffer.length > 20) keyBuffer = keyBuffer.slice(-20);
+            
+            if (keyBuffer.endsWith("devmode")) {
+                 console.log("👨‍💻 Dev Mode Activated: Bypassing Pre-launch!");
+                 if (preLaunchProp) preLaunchProp.value = true;
+            }
+        });
+        // ------------------------------
+
         const mode0 = readModeFromBooleans(false);
         setMode(mode0, { resetPage: true });
         setLoaded(true);
         console.log("[READY] Leaderboard loaded");
 
-        // Polling loop to detect tab changes inside Rive
         let lastMode = mode0;
         setInterval(() => {
           const m = readModeFromBooleans(false);
@@ -721,11 +753,13 @@
       if (!a) a = { attendanceLevel: 0, attendanceDay: 0 }; 
       if (!h) h = { homeworkLevel: 0, homeworkDay: 0 };
 
+      // --- HOUSE LOOKUP ---
+      // 1. Identify the User's House
       const userHouseName = (p.house || '').trim();
+      // 2. Find that House's data object
       const userHouseData = datasets.houses.map.get(userHouseName.toLowerCase());
-      const leadingHouse = datasets.houses.rows.length > 0 ? datasets.houses.rows[0] : null;
 
-      // --- String Bindings ---
+      // --- STRINGS ---
       const setStr = (name, val) => {
           const prop = overviewVM.string?.(name) ?? overviewVM.getString?.(name);
           if (prop) prop.value = String(val || '');
@@ -741,11 +775,12 @@
       setStr('HouseName', userHouseName);
       setStr('HousePosition', userHouseData ? userHouseData.positionStr : "");
 
-      if (leadingHouse) {
-         setStr('House_OrientationCompletion', leadingHouse.orientation);
+      // FIX: Use 'userHouseData' instead of 'leadingHouse'
+      if (userHouseData) {
+         setStr('House_OrientationCompletion', userHouseData.orientation);
       }
 
-      // --- Number Bindings ---
+      // --- NUMBERS ---
       const setNum = (name, val) => {
           const prop = overviewVM.number?.(name) ?? overviewVM.getNumber?.(name);
           if (prop) prop.value = Number(val || 0);
@@ -762,16 +797,23 @@
       setNum('PointsLost', p.pointsLost);
       setNum('MoneyValue', Number((p.pointsBanked * 0.01).toFixed(2)));
 
-      if (leadingHouse) {
-          setNum('House_LessonAttendance', leadingHouse.lessonAttendance);
-          setNum('House_ModuleCompletion', leadingHouse.moduleCompletion);
-          setNum('House_HomeworkCompletion', leadingHouse.homework);
-          setNum('House_AssessmentSubmission', leadingHouse.assessmentSubmission);
-          setNum('House_ManualPoints', leadingHouse.manualPoints);
+      // FIX: Use 'userHouseData' for all House stats on the Me Card
+      if (userHouseData) {
+          setNum('House_LessonAttendance', userHouseData.lessonAttendance);
+          setNum('House_ModuleCompletion', userHouseData.moduleCompletion);
+          setNum('House_HomeworkCompletion', userHouseData.homework);
+          setNum('House_AssessmentSubmission', userHouseData.assessmentSubmission);
+          setNum('House_ManualPoints', userHouseData.manualPoints);
           
-          setNum('HousePoints', leadingHouse.score);
+          // This fixes the specific bug: showing YOUR house points, not the winner's
+          setNum('HousePoints', userHouseData.score);
       } else {
           setNum('HousePoints', 0);
+          setNum('House_LessonAttendance', 0);
+          setNum('House_ModuleCompletion', 0);
+          setNum('House_HomeworkCompletion', 0);
+          setNum('House_AssessmentSubmission', 0);
+          setNum('House_ManualPoints', 0);
       }
 
       setStr('AttendanceLevel', String(a.attendanceLevel || 0)); 
@@ -779,12 +821,12 @@
       setStr('HomeworkLevel', String(h.homeworkLevel || 0));
       setNum('HomeworkStreak', h.homeworkDay);
 
-      // --- Date & Week Logic ---
+      // --- DATE & WEEK UPDATE ---
       const weekInfo = getCurrentWeekInfo();
       setNum('WeekNumber', weekInfo.number);
       setStr('Dates', weekInfo.range);
 
-      // --- Longest Streak Logic ---
+      // --- Longest Streak & Enums ---
       const attendStreak = a.attendanceDay || 0;
       const homeStreak   = h.homeworkDay || 0;
       let longestVal = 0;
@@ -801,7 +843,6 @@
       setNum('LongestStreak', longestVal);
       setStr('LongestStreakCat', longestCat);
 
-      // --- Enum Bindings ---
       const ps1 = overviewVM.enum?.('PointsStatusEnum1') ?? overviewVM.getEnum?.('PointsStatusEnum1');
       if (ps1) {
           try { ps1.value = normalizePointsStatus(p.status) ?? null; } catch { }
