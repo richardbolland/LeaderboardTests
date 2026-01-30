@@ -679,11 +679,11 @@
         // 7.4 Start Application
         writeOverview();
         
-        /*// --- preLaunch Date Check ---
+        // --- preLaunch Date Check ---
         const preLaunchProp = vm1?.boolean?.('preLaunch') ?? vm1?.getBoolean?.('preLaunch');
         if (preLaunchProp) {
             // Target: Feb 2, 2026 (Month is 0-indexed)
-            const targetDate = new Date(2026, 1, 2); 
+            const targetDate = new Date(2025, 1, 2); 
             const now = new Date();
             
             if (now >= targetDate) {
@@ -692,7 +692,7 @@
             } else {
                 preLaunchProp.value = false;
             }
-        }*/
+        }
 
         // --- NEW: Dev Mode Listener ---
         // Type "devmode" on your keyboard to force launch
